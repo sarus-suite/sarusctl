@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use raster::{self, EDF};
 use sarus_suite_podman_driver::{self as pmd, PodmanCtx};
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, str::Utf8Error};
+use std::{env, fs, path::PathBuf, str::Utf8Error};
 
 /// CLI tool for sarus-suite
 #[derive(Parser)]
@@ -32,6 +32,8 @@ enum Command {
         #[arg(long, short, value_enum,default_value_t = FormatOutput::Text)]
         output: FormatOutput,
     },
+    /// List images including Parallax storage
+    Images {},
     /// Run container from EDF file
     Run {
         filepath: String,
@@ -46,7 +48,7 @@ fn get_podman_default_graphroot(p_ctx: &PodmanCtx) -> Result<PathBuf, Utf8Error>
     Ok(PathBuf::from(graphroot))
 }
 
-fn generate_podman_contexts(
+fn generate_podman_contexts_from_edf(
     edf: &EDF,
 ) -> Result<(PodmanCtx, PodmanCtx, PodmanCtx, PodmanCtx), Box<dyn std::error::Error>> {
     let default_ctx = PodmanCtx {
@@ -168,6 +170,35 @@ fn render(filepath: String, fout: FormatOutput) -> i32 {
     return out.return_code;
 }
 
+fn images() -> i32 {
+    let mut ctx = PodmanCtx {
+        podman_path: PathBuf::from("/usr/bin/podman"),
+        module: None,
+        graphroot: None,
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: Some(PathBuf::from(
+            env::var("PARALLAX_IMAGESTORE")
+                .expect("Could not retrieve value from PARALLAX_IMAGESTORE"),
+        )),
+    };
+
+    ctx.graphroot = match get_podman_default_graphroot(&ctx) {
+        Ok(o) => Some(o),
+        Err(e) => panic!("Failed to generate Podman contexts: {}", e),
+    };
+
+    if !fs::exists(ctx.ro_store.as_deref().unwrap())
+        .expect("Failed to check for existence of Parallax imagestore directory")
+    {
+        fs::create_dir_all(ctx.ro_store.as_deref().unwrap())
+            .expect("Failed to create Parallax imagestore directory");
+    }
+
+    pmd::images(Some(&ctx));
+    return 0;
+}
+
 fn run(filepath: String, container_cmd: &Vec<String>) -> i32 {
     let ret = raster::render(filepath.clone());
 
@@ -176,7 +207,8 @@ fn run(filepath: String, container_cmd: &Vec<String>) -> i32 {
         Err(_e) => panic!("Failed rendering EDF"),
     };
 
-    let (default_ctx, migrate_ctx, ro_ctx, run_ctx) = match generate_podman_contexts(&edf) {
+    let (default_ctx, migrate_ctx, ro_ctx, run_ctx) = match generate_podman_contexts_from_edf(&edf)
+    {
         Ok(o) => o,
         Err(e) => panic!("Failed to generate Podman contexts: {}", e),
     };
@@ -215,6 +247,7 @@ fn main() {
     let rc = match args.command {
         Command::Validate { filepath, output } => validate(filepath, output),
         Command::Render { filepath, output } => render(filepath, output),
+        Command::Images {} => images(),
         Command::Run {
             filepath,
             container_cmd,
