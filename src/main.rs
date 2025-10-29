@@ -34,6 +34,8 @@ enum Command {
     },
     /// List images including Parallax storage
     Images {},
+    /// Remove image from Parallax storage
+    Rmi { image: String },
     /// Run container from EDF file
     Run {
         filepath: String,
@@ -199,6 +201,32 @@ fn images() -> i32 {
     return 0;
 }
 
+fn rmi(image: String) -> i32 {
+    let mut ctx = PodmanCtx {
+        podman_path: PathBuf::from("/usr/bin/podman"),
+        module: None,
+        graphroot: None,
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: Some(PathBuf::from(
+            env::var("PARALLAX_IMAGESTORE")
+                .expect("Could not retrieve value from PARALLAX_IMAGESTORE"),
+        )),
+    };
+
+    ctx.graphroot = match get_podman_default_graphroot(&ctx) {
+        Ok(o) => Some(o),
+        Err(e) => panic!("Failed to generate Podman contexts: {}", e),
+    };
+
+    let parallax_path = PathBuf::from(
+        env::var("PARALLAX_PATH").expect("Could not retrieve value from PARALLAX_PATH"),
+    );
+
+    pmd::parallax_rmi(&parallax_path, &ctx, &image).unwrap();
+    return 0;
+}
+
 fn run(filepath: String, container_cmd: &Vec<String>) -> i32 {
     let ret = raster::render(filepath.clone());
 
@@ -248,6 +276,7 @@ fn main() {
         Command::Validate { filepath, output } => validate(filepath, output),
         Command::Render { filepath, output } => render(filepath, output),
         Command::Images {} => images(),
+        Command::Rmi { image } => rmi(image),
         Command::Run {
             filepath,
             container_cmd,
