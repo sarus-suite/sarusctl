@@ -86,7 +86,9 @@ fn generate_podman_contexts_from_edf(
 
     let run_ctx = PodmanCtx {
         podman_path: PathBuf::from(&edf.podman_path),
-        module: None,
+        module: Some(String::from(
+            env::var("PODMAN_MODULE").expect("Could not retrieve value from PODMAN_MODULE"),
+        )),
         graphroot: Some(PathBuf::from("/dev/shm/sarusctl-run/graphroot")),
         runroot: Some(PathBuf::from("/dev/shm/sarusctl-run/runroot")),
         parallax_mount_program: Some(PathBuf::from(&edf.parallax_mount_program)),
