@@ -1,0 +1,58 @@
+name: release (use devcontainer + cached)
+
+on:
+  push: {} 
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prebuild devcontainer
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: ghcr.io/${{ github.repository }}/devcontainer
+          cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
+          push: always
+
+      - name: Build in Dev Container
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: ghcr.io/${{ github.repository }}/devcontainer
+          cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
+          push: never
+          runCmd: cargo build --release
+
+      - name: Append arch to artifact
+        id: arch
+        run: |
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64) ARCH="amd64" ;;
+            aarch64|arm64) ARCH="arm64" ;;
+          esac
+          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
+          cp target/release/sarusctl "target/release/sarusctl-${ARCH}"
+          ls -lah target/release/
+
+      # keep a CI artifact as part of workflow
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sarusctl-${{ github.ref_name }}-${{ steps.arch.outputs.arch }}
+          path: target/release/sarusctl-${{ steps.arch.outputs.arch }}
+
