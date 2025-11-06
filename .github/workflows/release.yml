@@ -37,7 +37,7 @@ jobs:
 
       - name: Update version in Cargo.toml
         run: |
-          sed -i -E -e "/^name = \"rasterize\"/,/^version \=/ s/^version =.*$/version = \"${RELEASE_VERSION#v}\"/1" Cargo.toml
+          sed -i -E -e "/^name = \"sarusctl\"/,/^version \=/ s/^version =.*$/version = \"${RELEASE_VERSION#v}\"/1" Cargo.toml
 
       - name: Build
         run: |
@@ -46,7 +46,7 @@ jobs:
       - name: Rename artifact
         run: |
           mkdir tmp
-          cp target/x86_64-unknown-linux-musl/release/rasterize tmp/rasterize-amd64
+          cp target/x86_64-unknown-linux-musl/release/sarusctl tmp/sarusctl-amd64
 
       - name: Release
         uses: ncipollo/release-action@v1
@@ -54,7 +54,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          artifacts: "tmp/rasterize*"
+          artifacts: "tmp/sarusctl*"
           allowUpdates: true
           replacesArtifacts: false
           draft: false

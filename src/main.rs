@@ -81,8 +81,8 @@ fn generate_podman_contexts(
     let run_ctx = PodmanCtx {
         podman_path: PathBuf::from(&edf.podman_path),
         module: None,
-        graphroot: Some(PathBuf::from("/dev/shm/rasterize-run/graphroot")),
-        runroot: Some(PathBuf::from("/dev/shm/rasterize-run/runroot")),
+        graphroot: Some(PathBuf::from("/dev/shm/sarusctl-run/graphroot")),
+        runroot: Some(PathBuf::from("/dev/shm/sarusctl-run/runroot")),
         parallax_mount_program: Some(PathBuf::from(&edf.parallax_mount_program)),
         ro_store: Some(PathBuf::from(&edf.parallax_imagestore)),
     };
@@ -182,7 +182,7 @@ fn run(filepath: String, container_cmd: &Vec<String>) -> i32 {
     };
 
     let c_ctx = pmd::ContainerCtx {
-        name: String::from("rasterize"),
+        name: String::from("sarusctl"),
         interactive: true,
         detach: false,
         set_env: true,
