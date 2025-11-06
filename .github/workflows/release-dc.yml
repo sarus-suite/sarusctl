@@ -32,15 +32,15 @@ jobs:
       - name: Prebuild devcontainer
         uses: devcontainers/ci@v0.3
         with:
-          imageName: ghcr.io/${{ github.repository }}/devcontainer:${{ matrix.arch }}
-          cacheFrom: ghcr.io/${{ github.repository }}/devcontainer:${{ matrix.arch }}
+          imageName: ghcr.io/${{ github.repository }}/devcontainer-${{ matrix.arch }}
+          cacheFrom: ghcr.io/${{ github.repository }}/devcontainer-${{ matrix.arch }}
           push: always
 
       - name: Build in Dev Container
         uses: devcontainers/ci@v0.3
         with:
-          imageName: ghcr.io/${{ github.repository }}/devcontainer:${{ matrix.arch }}
-          cacheFrom: ghcr.io/${{ github.repository }}/devcontainer:${{ matrix.arch }}
+          imageName: ghcr.io/${{ github.repository }}/devcontainer-${{ matrix.arch }}
+          cacheFrom: ghcr.io/${{ github.repository }}/devcontainer-${{ matrix.arch }}
           push: never
           runCmd: |
             bash -lc '
