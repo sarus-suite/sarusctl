@@ -27,6 +27,14 @@ jobs:
           cd raster
           git checkout main
           git pull
+          cd ..
+          if [ ! -d podman-driver ]
+          then
+            git clone git@github.com:sarus-suite/podman-driver.git podman-driver
+          fi
+          cd podman-driver
+          git checkout main
+          git pull
           cd ../sarusctl
 
       - name: Set env
