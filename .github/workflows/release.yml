@@ -27,7 +27,7 @@ jobs:
           cd raster
           git checkout main
           git pull
-          cd ../rasterize
+          cd ../sarusctl
 
       - name: Set env
         run: |
