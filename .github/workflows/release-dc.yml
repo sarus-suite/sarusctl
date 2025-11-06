@@ -29,6 +29,16 @@ jobs:
           cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
           push: always
 
+      - name: Detect arch
+        id: arch
+        run: |
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64) ARCH="amd64" ;;
+            aarch64|arm64) ARCH="arm64" ;;
+          esac
+          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
+
       - name: Build in Dev Container
         uses: devcontainers/ci@v0.3
         with:
@@ -38,9 +48,7 @@ jobs:
           runCmd: |
             bash -lc '
               cargo build --release
-              ARCH=$(uname -m)
-              case "$ARCH" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; esac
-              cp target/release/sarusctl target/release/sarusctl-$ARCH
+              cp target/release/sarusctl target/release/sarusctl-${{ steps.arch.outputs.arch }}
             '
 
       # keep a CI artifact as part of workflow
