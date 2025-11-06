@@ -35,19 +35,13 @@ jobs:
           imageName: ghcr.io/${{ github.repository }}/devcontainer
           cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
           push: never
-          runCmd: cargo build --release
-
-      - name: Append arch to artifact
-        id: arch
-        run: |
-          ARCH="$(uname -m)"
-          case "$ARCH" in
-            x86_64) ARCH="amd64" ;;
-            aarch64|arm64) ARCH="arm64" ;;
-          esac
-          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
-          cp target/release/sarusctl "target/release/sarusctl-${ARCH}"
-          ls -lah target/release/
+          runCmd: |
+            bash -lc '
+              cargo build --release
+              ARCH=$(uname -m)
+              case "$ARCH" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; esac
+              cp target/release/sarusctl target/release/sarusctl-$ARCH
+            '
 
       # keep a CI artifact as part of workflow
       - name: Upload build artifact
