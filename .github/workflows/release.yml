@@ -30,7 +30,7 @@ jobs:
           cd ..
           if [ ! -d podman-driver ]
           then
-            git clone git@github.com:sarus-suite/podman-driver.git podman-driver
+            git clone https://github.com/sarus-suite/podman-driver.git podman-driver
           fi
           cd podman-driver
           git checkout main
