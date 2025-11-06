@@ -1,7 +1,14 @@
 name: release (use devcontainer + cached)
 
 on:
-  push: {}
+  push:
+    branches: [ main ]          # only run automatically on pushes to main
+  workflow_dispatch:            # run manually from the Actions tab
+    inputs:
+      ref:
+        description: "Git ref (branch, tag, or SHA) to build"
+        required: false
+        default: ""             # leave empty to use the selected branch in the UI
 
 permissions:
   contents: write
@@ -21,6 +28,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # for manual trigger
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref_name }}
 
       - name: Login to GHCR
         uses: docker/login-action@v3
