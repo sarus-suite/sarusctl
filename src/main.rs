@@ -207,7 +207,7 @@ fn images() -> i32 {
 
 fn migrate(image: String) -> i32 {
     let mut ctx = PodmanCtx {
-        podman_path: PathBuf::from("/usr/bin/podman"),
+        podman_path: PathBuf::from("podman"),
         module: None,
         graphroot: None,
         runroot: None,
