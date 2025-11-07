@@ -16,27 +16,6 @@ jobs:
         run: |
           rm -rf tmp
       
-          
-      - name: Collect raster library
-        run: |
-          cd ..
-          if [ ! -d raster ]
-          then
-            git clone https://github.com/sarus-suite/raster.git raster
-          fi
-          cd raster
-          git checkout main
-          git pull
-          cd ..
-          if [ ! -d podman-driver ]
-          then
-            git clone https://github.com/sarus-suite/podman-driver.git podman-driver
-          fi
-          cd podman-driver
-          git checkout main
-          git pull
-          cd ../sarusctl
-
       - name: Set env
         run: |
           GIT_VERSION=$(git describe --tags --always | tr '-' '_')

@@ -970,6 +970,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 [[package]]
 name = "raster"
 version = "0.1.0"
+source = "git+https://github.com/sarus-suite/raster#ba8281a60dba8a8356bbdcadbea1820c3f586b46"
 dependencies = [
  "derivative",
  "jsonschema",
@@ -977,17 +978,6 @@ dependencies = [
  "serde_json",
  "shellexpand",
  "toml",
-]
-
-[[package]]
-name = "rasterize"
-version = "0.0.0"
-dependencies = [
- "clap",
- "raster",
- "sarus-suite-podman-driver",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1128,10 +1118,22 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 [[package]]
 name = "sarus-suite-podman-driver"
 version = "0.1.0"
+source = "git+https://github.com/sarus-suite/podman-driver#aee3427a0100618d680a8910848a5a963a2dac49"
 dependencies = [
  "anyhow",
  "bstr",
  "raster",
+]
+
+[[package]]
+name = "sarusctl"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "raster",
+ "sarus-suite-podman-driver",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
