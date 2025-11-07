@@ -227,8 +227,16 @@ fn migrate(image: String) -> i32 {
         env::var("PARALLAX_PATH").expect("Could not retrieve value from PARALLAX_PATH"),
     );
 
-    pmd::parallax_migrate(&parallax_path, &ctx, &image).unwrap();
-    return 0;
+    let mut rc = 0;
+    let ret = pmd::parallax_migrate(&parallax_path, &ctx, &image);
+    match ret {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("{e}");
+            rc = 1;
+        }
+    }
+    return rc;
 }
 
 fn rmi(image: String) -> i32 {
