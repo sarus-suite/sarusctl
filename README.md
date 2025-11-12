@@ -2,12 +2,12 @@
 
 Turning an EDF into a running container, with minimal friction.
 `sarusctl` standardizes how you go from "recipe" to "runnable" containerized deployment.
-Give it a EDF file and it will validate it, show you examplty what it resolves to, pulls and migrate the image if needed, and run the container using Podman with sane HPC defaults. Accelerating working with high performance containers with Podman on HPC systems.
+Give it a EDF file and it will validate it, show you exactly what it resolves to, pulls and migrate the image if needed, and run the container using Podman with sane HPC defaults. Accelerating working with high performance containers with Podman on HPC systems.
 
 ## Why it matters
 * One file in, one predictable run out. EDF becomes a container with the same steps everywhere. No snowflake deployments.
 * Delivery without friction. `sarusctl` pulls the image (if needed), migrates it into a read-only store with Parallax, and launches with ephemeral settings.
-* Built-in guardrails. `validate` helps you catch errors early; `render` shows the fully resolved configuration you will run.
+* Built-in guardrails. `validate` helps you catch errors early.
 * Portable binary, repeatable builds. Prebuilt binaries for amd64 and arm64; devcontainer config ships a static optimized Rust build.
 
 ## What sarusctl simplifies for you
