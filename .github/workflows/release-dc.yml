@@ -2,7 +2,7 @@ name: release (use devcontainer + cached)
 
 on:
   push:
-    branches: [ main ]          # only run automatically on pushes to main
+    branches: [ main, devcontainer ]          # only run automatically on pushes to main
   workflow_dispatch:            # run manually from the Actions tab
     inputs:
       ref:
