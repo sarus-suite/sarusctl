@@ -8,7 +8,7 @@
   "mounts": [
     "type=volume,src=${localWorkspaceFolderBasename}-rustup,dst=/usr/local/rustup",
     "type=volume,src=${localWorkspaceFolderBasename}-cargo-registry,dst=/usr/local/cargo/registry",
-	"type=volume,src=${localWorkspaceFolderBasename}-cargo-git,dst=/usr/local/cargo/git"
+    "type=volume,src=${localWorkspaceFolderBasename}-cargo-git,dst=/usr/local/cargo/git"
   ],
   "customizations": {
     // tests vscode integrations
