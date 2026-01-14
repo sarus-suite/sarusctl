@@ -45,7 +45,7 @@ jobs:
           push: never
           runCmd: |
             bash -lc '
-              GIT_VERSION=$(git describe --tags --always | tr '-' '_')
+              export GIT_VERSION=$(git describe --tags --always | tr '-' '_')
               sed -i -E -e "/^name = \"sarusctl\"/,/^version \=/ s/^version =.*$/version = \"${GIT_VERSION#v}\"/1" Cargo.toml
               cargo build --release
               cp target/release/sarusctl "target/release/sarusctl-${{ matrix.arch }}"
