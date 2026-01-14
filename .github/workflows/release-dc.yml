@@ -1,4 +1,4 @@
-name: release (use devcontainer + cached)
+name: build main
 
 on:
   push:
@@ -15,7 +15,7 @@ permissions:
   packages: write
 
 jobs:
-  build-and-release:
+  build:
     strategy:
       matrix:
         include:
