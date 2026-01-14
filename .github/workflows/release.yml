@@ -45,7 +45,6 @@ jobs:
           push: never
           runCmd: |
             bash -lc '
-              sed -i -E -e "/^name = \"sarusctl\"/,/^version \=/ s/^version =.*$/version = \"${GITHUB_REF_NAME#v}\"/1" Cargo.toml
               cargo build --release
               cp target/release/sarusctl "target/release/sarusctl-${{ matrix.arch }}"
               ls -lah target/release/
