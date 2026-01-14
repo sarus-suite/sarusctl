@@ -6,34 +6,51 @@ on:
       - 'v*' 
 
 jobs:
-  build:
-    if: github.actor == 'matteo-chesi'
-    runs-on: chesim-zinal-login
+  build-and-release:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Clean tmp
-        run: |
-          rm -rf tmp
-      
-      - name: Set env
-        run: |
-          GIT_VERSION=$(git describe --tags --always | tr '-' '_')
-          #echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV      
-          echo "RELEASE_VERSION=${GIT_VERSION}" >> $GITHUB_ENV      
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # for manual trigger
+          ref: ${{ inputs.ref != '' && inputs.ref || github.ref_name }}
 
-      - name: Update version in Cargo.toml
-        run: |
-          sed -i -E -e "/^name = \"sarusctl\"/,/^version \=/ s/^version =.*$/version = \"${RELEASE_VERSION#v}\"/1" Cargo.toml
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build
-        run: |
-          cargo build --release --target=x86_64-unknown-linux-musl 
+      - name: Prebuild devcontainer
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: ghcr.io/${{ github.repository }}/devcontainer-${{ matrix.arch }}
+          cacheFrom: ghcr.io/${{ github.repository }}/devcontainer-${{ matrix.arch }}
+          push: always
 
-      - name: Rename artifact
-        run: |
-          mkdir tmp
-          cp target/x86_64-unknown-linux-musl/release/sarusctl tmp/sarusctl-amd64
+      - name: Build in Dev Container
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: ghcr.io/${{ github.repository }}/devcontainer-${{ matrix.arch }}
+          cacheFrom: ghcr.io/${{ github.repository }}/devcontainer-${{ matrix.arch }}
+          push: never
+          runCmd: |
+            bash -lc '
+              GIT_VERSION=$(git describe --tags --always | tr '-' '_')
+              sed -i -E -e "/^name = \"sarusctl\"/,/^version \=/ s/^version =.*$/version = \"${RELEASE_VERSION#v}\"/1" Cargo.toml
+              cargo build --release
+              cp target/release/sarusctl "target/release/sarusctl-${{ matrix.arch }}"
+              ls -lah target/release/
+            '
 
       - name: Release
         uses: ncipollo/release-action@v1
@@ -41,7 +58,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          artifacts: "tmp/sarusctl*"
+          artifacts: "target/release/sarusctl-*"
           allowUpdates: true
           replacesArtifacts: false
           draft: false
