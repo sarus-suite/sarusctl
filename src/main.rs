@@ -268,7 +268,8 @@ fn run(filepath: String, container_cmd: &Vec<String>, config: &raster::config::C
         println!("Pulling {} with Podman", &edf.image);
         pmd::pull(&edf.image, Some(&default_ctx));
         println!("Migrating {} with Parallax", &edf.image);
-        match pmd::parallax_migrate(&PathBuf::from(&edf.parallax_path), &migrate_ctx, &edf.image) {
+        let parallax_path = PathBuf::from(&config.parallax_path);
+        match pmd::parallax_migrate(&parallax_path, &migrate_ctx, &edf.image) {
             Ok(_) => (),
             Err(e) => panic!("Failed migrating parallax: {}", e),
         };
