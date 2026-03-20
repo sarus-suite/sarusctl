@@ -3,6 +3,7 @@ use raster::{self, EDF};
 use sarus_suite_podman_driver::{self as pmd, PodmanCtx};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, str::Utf8Error};
+use users;
 
 /// CLI tool for sarus-suite
 #[derive(Parser)]
@@ -62,6 +63,7 @@ fn generate_podman_contexts(
         runroot: None,
         parallax_mount_program: None,
         ro_store: None,
+        podman_env: None,
     };
 
     let default_graphroot = get_podman_default_graphroot(&default_ctx)?;
@@ -73,6 +75,7 @@ fn generate_podman_contexts(
         runroot: None,
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        podman_env: None,
     };
 
     let ro_ctx = PodmanCtx {
@@ -82,7 +85,11 @@ fn generate_podman_contexts(
         runroot: None,
         parallax_mount_program: None,
         ro_store: None,
+        podman_env: None,
     };
+
+    let uid = users::get_current_uid();
+    let gid = users::get_current_gid();
 
     let run_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
@@ -91,7 +98,14 @@ fn generate_podman_contexts(
         runroot: Some(PathBuf::from("/dev/shm/sarusctl-run/runroot")),
         parallax_mount_program: Some(PathBuf::from(&config.parallax_mount_program)),
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-    };
+        podman_env: None,
+    }
+    .with_env("PARALLAX_MP_UID", uid.to_string())
+    .with_env("PARALLAX_MP_GID", gid.to_string())
+    .with_env(
+        "PARALLAX_MP_LOGFILE",
+        format!("/tmp/parallax-{}/mount_program.log", uid),
+    );
 
     Ok((default_ctx, migrate_ctx, ro_ctx, run_ctx))
 }
@@ -182,6 +196,7 @@ fn images(config: &raster::config::Config) -> i32 {
         runroot: None,
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        podman_env: None,
     };
 
     ctx.graphroot = match get_podman_default_graphroot(&ctx) {
@@ -208,6 +223,7 @@ fn migrate(image: String, config: &raster::config::Config) -> i32 {
         runroot: None,
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        podman_env: None,
     };
 
     ctx.graphroot = match get_podman_default_graphroot(&ctx) {
@@ -229,6 +245,7 @@ fn rmi(image: String, config: &raster::config::Config) -> i32 {
         runroot: None,
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        podman_env: None,
     };
 
     ctx.graphroot = match get_podman_default_graphroot(&ctx) {
