@@ -1068,8 +1068,8 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "sarus-suite-podman-driver"
-version = "0.1.0"
-source = "git+https://github.com/sarus-suite/podman-driver#b0886aa38d7f740cb0761fac50e3024a7eab2566"
+version = "0.2.0"
+source = "git+https://github.com/sarus-suite/podman-driver#30f286a85a1612bd3370473ced9c310e983c8805"
 dependencies = [
  "anyhow",
  "bstr",
