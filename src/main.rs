@@ -280,8 +280,10 @@ fn run(filepath: String, container_cmd: &Vec<String>, config: &raster::config::C
         Err(e) => panic!("Failed to generate Podman contexts: {}", e),
     };
 
+    let container_name = format!("sarusctl-{}", &Uuid::new_v4().simple().to_string()[..8]);
+
     let c_ctx = pmd::ContainerCtx {
-        name: String::from("sarusctl"),
+        name: container_name,
         interactive: true,
         detach: false,
         set_env: true,
