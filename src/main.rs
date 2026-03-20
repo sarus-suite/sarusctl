@@ -3,6 +3,7 @@ use raster::{self, EDF};
 use sarus_suite_podman_driver::{self as pmd, PodmanCtx};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, str::Utf8Error};
+use uuid::Uuid;
 use users;
 
 /// CLI tool for sarus-suite
@@ -90,12 +91,18 @@ fn generate_podman_contexts(
 
     let uid = users::get_current_uid();
     let gid = users::get_current_gid();
+    let username = users::get_user_by_uid(uid)
+    .unwrap_or_else(|| panic!("Failed to resolve current user from passwd database"))
+    .name()
+    .to_string_lossy()
+    .into_owned();
+    let roots_base = PathBuf::from("/dev/shm").join(username).join("sarusctl");
 
     let run_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
         module: Some(String::from(&config.podman_module)),
-        graphroot: Some(PathBuf::from("/dev/shm/sarusctl-run/graphroot")),
-        runroot: Some(PathBuf::from("/dev/shm/sarusctl-run/runroot")),
+        graphroot: Some(roots_base.join("graphroot")),
+        runroot: Some(roots_base.join("runroot")),
         parallax_mount_program: Some(PathBuf::from(&config.parallax_mount_program)),
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
         podman_env: None,
