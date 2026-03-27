@@ -14,6 +14,7 @@ fn help_lists_subcommands() {
         .stdout(predicate::str::contains("validate"))
         .stdout(predicate::str::contains("render"))
         .stdout(predicate::str::contains("run"));
+    // TODO check existence of all subcommands instead of just a few
 }
 
 #[test]
@@ -41,7 +42,9 @@ fn validate_invalid_edf_text_output() {
         .assert()
         .code(1)
         .stdout(predicate::str::contains("is an INVALID EDF file"))
-        .stderr(predicate::str::contains("not valid under any of the schemas"));
+        .stderr(predicate::str::contains(
+            "not valid under any of the schemas",
+        ));
 }
 
 #[test]
@@ -61,7 +64,9 @@ fn validate_invalid_edf_json_output() {
         .assert()
         .code(1)
         .stdout(predicate::str::contains("\"return_code\": 1"))
-        .stdout(predicate::str::contains("not valid under any of the schemas"));
+        .stdout(predicate::str::contains(
+            "not valid under any of the schemas",
+        ));
 }
 
 #[test]
@@ -79,7 +84,9 @@ fn render_invalid_edf_output() {
     cmd.args(["render", &fixture("invalid.toml")])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("not valid under any of the schemas"));
+        .stderr(predicate::str::contains(
+            "not valid under any of the schemas",
+        ));
 }
 
 #[test]

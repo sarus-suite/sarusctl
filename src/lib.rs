@@ -16,6 +16,25 @@ pub enum FormatOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormattedOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub fn format_output(format: FormatOutput, output: &AppOutput) -> FormattedOutput {
+    match format {
+        FormatOutput::Text => FormattedOutput {
+            stdout: output.stdout.clone(),
+            stderr: output.stderr.clone(),
+        },
+        FormatOutput::Json => FormattedOutput {
+            stdout: serde_json::to_string_pretty(output).unwrap_or_else(|_| String::from("{}")),
+            stderr: String::new(),
+        },
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandSpec {
     Validate {
         filepath: String,
@@ -76,25 +95,6 @@ impl AppOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FormattedOutput {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-pub fn format_output(format: FormatOutput, output: &AppOutput) -> FormattedOutput {
-    match format {
-        FormatOutput::Text => FormattedOutput {
-            stdout: output.stdout.clone(),
-            stderr: output.stderr.clone(),
-        },
-        FormatOutput::Json => FormattedOutput {
-            stdout: serde_json::to_string_pretty(output).unwrap_or_else(|_| String::from("{}")),
-            stderr: String::new(),
-        },
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppError {
     ConfigLoad(String),
     PodmanInfo(String),
@@ -139,7 +139,7 @@ pub trait RasterOps {
 }
 
 pub trait ContainerRuntime {
-    fn info_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError>;
+    fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError>;
     fn images(&self, ctx: &PodmanCtx) -> Result<(), AppError>;
     fn pull(&self, image: &str, ctx: &PodmanCtx) -> Result<(), AppError>;
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError>;
@@ -163,6 +163,7 @@ pub trait ContainerRuntime {
         container_cmd: &[String],
     ) -> Result<i32, AppError>;
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
+    // TODO add kube_down for pod teardown
 }
 
 pub struct AppDeps<'a> {
@@ -190,7 +191,7 @@ impl RasterOps for RealRasterOps {
 pub struct RealContainerRuntime;
 
 impl ContainerRuntime for RealContainerRuntime {
-    fn info_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
+    fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
         let output = pmd::info(Some("{{.Store.GraphRoot}}"), Some(ctx));
         if !output.status.success() {
             return Err(AppError::PodmanInfo(
@@ -253,7 +254,9 @@ impl ContainerRuntime for RealContainerRuntime {
     ) -> Result<i32, AppError> {
         pmd::run_from_edf(edf, Some(run_ctx), container_ctx, container_cmd)
             .code()
-            .ok_or_else(|| AppError::Runtime(String::from("Container process terminated by signal")))
+            .ok_or_else(|| {
+                AppError::Runtime(String::from("Container process terminated by signal"))
+            })
     }
 
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError> {
@@ -282,6 +285,8 @@ impl UserContext for RealUserContext {
     }
 }
 
+/// Context which uses the Parallax imagestore (normally a read-only additionalimagestore location) as graphroot.
+/// Mostly useful to check if an image exists in the Parallax store, and therefore if it needs pulling or not.
 pub fn build_readonly_ctx(config: &Config) -> PodmanCtx {
     PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
@@ -294,6 +299,8 @@ pub fn build_readonly_ctx(config: &Config) -> PodmanCtx {
     }
 }
 
+/// Context for running containers. Fully custom Sarus Suite parameters (Podman module, Parallax imagestore, etc.).
+/// Uses sarusctl-specific graphroot and runroot to not tamper with default podman rootdirs
 pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
     let roots_base = PathBuf::from("/dev/shm")
         .join(&user.username)
@@ -316,6 +323,7 @@ pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
     )
 }
 
+/// Context for listing images: default graphroot and Parallax imagestore as read-only additionalimagestore
 pub fn build_images_ctx(config: &Config, graphroot: PathBuf) -> PodmanCtx {
     PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
@@ -328,6 +336,7 @@ pub fn build_images_ctx(config: &Config, graphroot: PathBuf) -> PodmanCtx {
     }
 }
 
+/// Context for pulling images with Podman, essentially equivalent to native Podman configuration
 fn build_pull_ctx(config: &Config) -> PodmanCtx {
     PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
@@ -354,6 +363,7 @@ pub fn extract_images_from_yaml_manifest(filepath: &Path) -> Result<Vec<String>,
     extract_images_from_yaml_str(&contents)
 }
 
+/// Recursively traverse the YAML structure to find all values of "image" keys that are strings, and collect them into the provided set.
 fn collect_yaml_images(value: &yaml_serde::Value, images: &mut BTreeSet<String>) {
     match value {
         yaml_serde::Value::Mapping(mapping) => {
@@ -380,6 +390,8 @@ fn collect_yaml_images(value: &yaml_serde::Value, images: &mut BTreeSet<String>)
 
 pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
     match command {
+        // TODO why do validate and render functions return AppOutput directly instead of Result<AppOutput, AppError>
+        // like the other commands? Look into it and consider unifying the approach for better consistency
         CommandSpec::Validate { filepath, .. } => Ok(validate_command(&filepath, deps)),
         CommandSpec::Render { filepath, .. } => Ok(render_command(&filepath, deps)),
         CommandSpec::Images => images_command(deps),
@@ -405,10 +417,7 @@ pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOu
 fn validate_command(filepath: &str, deps: &AppDeps<'_>) -> AppOutput {
     match deps.raster.validate(filepath) {
         Ok(_) => AppOutput::success(format!("{filepath} is a valid EDF file")),
-        Err(err) => AppOutput::failure(
-            format!("{filepath} is an INVALID EDF file"),
-            err,
-        ),
+        Err(err) => AppOutput::failure(format!("{filepath} is an INVALID EDF file"), err),
     }
 }
 
@@ -423,6 +432,7 @@ fn render_command(filepath: &str, deps: &AppDeps<'_>) -> AppOutput {
 
 fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
     let config = deps.raster.load_config()?;
+    // TODO probably not necessary to have seed_ctx. Look code before refactoring
     let seed_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
         module: None,
@@ -432,7 +442,9 @@ fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
         podman_env: None,
     };
-    let graphroot = deps.runtime.info_graphroot(&seed_ctx)?;
+    // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
+    // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
+    let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
     let ctx = build_images_ctx(&config, graphroot);
 
     if let Some(ro_store) = ctx.ro_store.as_deref()
@@ -443,7 +455,9 @@ fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
         })?
     {
         fs::create_dir_all(ro_store).map_err(|e| {
-            AppError::Io(format!("Failed to create Parallax imagestore directory: {e}"))
+            AppError::Io(format!(
+                "Failed to create Parallax imagestore directory: {e}"
+            ))
         })?;
     }
 
@@ -470,6 +484,7 @@ fn migrate_command(
     config: &Config,
     deps: &AppDeps<'_>,
 ) -> Result<AppOutput, AppError> {
+    // TODO probably not necessary to have seed_ctx. Look code before refactoring
     let seed_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
         module: None,
@@ -479,7 +494,9 @@ fn migrate_command(
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
         podman_env: None,
     };
-    let graphroot = deps.runtime.info_graphroot(&seed_ctx)?;
+    // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
+    // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
+    let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
     let ctx = build_images_ctx(config, graphroot);
     let parallax_path = PathBuf::from(&config.parallax_path);
 
@@ -490,10 +507,13 @@ fn migrate_command(
         )));
     }
 
-    Ok(AppOutput::success(format!("Migrating {image} with Parallax")))
+    Ok(AppOutput::success(format!(
+        "Migrating {image} with Parallax"
+    )))
 }
 
 fn rmi_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+    // TODO probably not necessary to have seed_ctx. Look code before refactoring
     let seed_ctx = PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
         module: None,
@@ -503,7 +523,9 @@ fn rmi_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppOu
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
         podman_env: None,
     };
-    let graphroot = deps.runtime.info_graphroot(&seed_ctx)?;
+    // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
+    // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
+    let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
     let ctx = build_images_ctx(config, graphroot);
     let parallax_path = PathBuf::from(&config.parallax_path);
 
@@ -518,6 +540,8 @@ fn run_command(
 ) -> Result<AppOutput, AppError> {
     match deps.raster.render(filepath) {
         Ok(edf) => {
+            // Loading config in each branch is a small duplication,
+            // but allows to integration test invalid EDF cases without needing a valid config present
             let config = deps.raster.load_config()?;
             run_edf_command(&edf, container_cmd, &config, deps)
         }
@@ -547,6 +571,7 @@ fn run_edf_command(
 
     if !deps.runtime.image_exists(&edf.image, &ro_ctx)? {
         merge_output(&mut output, pull_command(&edf.image, config, deps)?);
+        // TODO more robust error handling and reporting if pull or migrate fails, to avoid trying to run with a missing image
     }
 
     let container_name = format!("sarusctl-{}", &Uuid::new_v4().simple().to_string()[..8]);
@@ -573,10 +598,6 @@ fn run_yaml_command(
     let ro_ctx = build_readonly_ctx(config);
     let mut run_ctx = build_run_ctx(config, &user);
     run_ctx.module = None;
-    run_ctx = run_ctx.with_env(
-        "PARALLAX_MP_LOGFILE",
-        format!("/tmp/parallax-{}/mount_program.log", user.uid),
-    );
 
     let images = extract_images_from_yaml_manifest(Path::new(filepath))?;
     let mut output = AppOutput::success("");
@@ -584,10 +605,13 @@ fn run_yaml_command(
     for image in images {
         if !deps.runtime.image_exists(&image, &ro_ctx)? {
             merge_output(&mut output, pull_command(&image, config, deps)?);
+            // TODO more robust error handling and reporting if pull or migrate fails, to avoid trying to run with missing images
         }
     }
 
     deps.runtime.kube_play(filepath, &run_ctx)?;
+    // TODO podman exec user command into container marked with specific extension
+    // TODO tear down pod with kube_down after user command completes, and report any errors from that as well
     Ok(output)
 }
 
@@ -690,6 +714,7 @@ mod tests {
         }
     }
 
+    // TODO explain why do you need RefCells instead of plain datatypes
     struct FakeContainerRuntime {
         calls: RefCell<Vec<String>>,
         graphroot: Result<PathBuf, AppError>,
@@ -727,8 +752,10 @@ mod tests {
     }
 
     impl ContainerRuntime for FakeContainerRuntime {
-        fn info_graphroot(&self, _ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
-            self.calls.borrow_mut().push(String::from("info_graphroot"));
+        fn default_graphroot(&self, _ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
+            self.calls
+                .borrow_mut()
+                .push(String::from("default_graphroot"));
             self.graphroot.clone()
         }
 
@@ -746,7 +773,9 @@ mod tests {
         }
 
         fn image_exists(&self, image: &str, _ctx: &PodmanCtx) -> Result<bool, AppError> {
-            self.calls.borrow_mut().push(format!("image_exists:{image}"));
+            self.calls
+                .borrow_mut()
+                .push(format!("image_exists:{image}"));
             let mut states = self.image_exists.borrow_mut();
             let queue = states.entry(image.to_string()).or_default();
             Ok(queue.pop_front().unwrap_or(false))
@@ -772,7 +801,10 @@ mod tests {
             image: &str,
         ) -> Result<(), AppError> {
             self.calls.borrow_mut().push(format!("rmi:{image}"));
-            self.rmi_results.borrow_mut().remove(image).unwrap_or(Ok(()))
+            self.rmi_results
+                .borrow_mut()
+                .remove(image)
+                .unwrap_or(Ok(()))
         }
 
         fn run_from_edf(
@@ -787,11 +819,14 @@ mod tests {
         }
 
         fn kube_play(&self, filepath: &str, _run_ctx: &PodmanCtx) -> Result<(), AppError> {
-            self.calls.borrow_mut().push(format!("kube_play:{filepath}"));
+            self.calls
+                .borrow_mut()
+                .push(format!("kube_play:{filepath}"));
             self.kube_play_result.clone()
         }
     }
 
+    // TODO: Why a function instead of a direct struct initialization?
     fn deps<'a>(
         raster: &'a dyn RasterOps,
         runtime: &'a dyn ContainerRuntime,
@@ -895,7 +930,10 @@ spec:
         };
 
         let ro = build_readonly_ctx(&config);
-        assert_eq!(ro.graphroot, Some(PathBuf::from("/scratch/user/parallax/store")));
+        assert_eq!(
+            ro.graphroot,
+            Some(PathBuf::from("/scratch/user/parallax/store"))
+        );
 
         let run = build_run_ctx(&config, &user);
         assert_eq!(run.module, Some(String::from("hpc")));
@@ -974,10 +1012,9 @@ spec:
     #[test]
     fn render_success_returns_json() {
         let mut raster = FakeRasterOps::new(sample_config());
-        raster.render_results.insert(
-            String::from("valid.edf"),
-            Ok(sample_edf("alpine:3.22")),
-        );
+        raster
+            .render_results
+            .insert(String::from("valid.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
         let user = FakeUserContext {
             user: CurrentUser {
@@ -1023,7 +1060,7 @@ spec:
         assert!(imagestore.exists());
         assert_eq!(
             runtime.calls(),
-            vec![String::from("info_graphroot"), String::from("images")]
+            vec![String::from("default_graphroot"), String::from("images")]
         );
     }
 
@@ -1055,12 +1092,14 @@ spec:
             vec![
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
-                String::from("info_graphroot"),
+                String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
                 String::from("image_exists:alpine:3.22")
             ]
         );
     }
+
+    // TODO add migrate success test. Probably similar to pull success test?
 
     #[test]
     fn migrate_failure_is_returned_as_runtime_error() {
@@ -1089,6 +1128,8 @@ spec:
 
         assert_eq!(err, AppError::Runtime(String::from("boom")));
     }
+
+    // TODO add rmi success test
 
     #[test]
     fn rmi_failure_is_returned_as_runtime_error() {
@@ -1121,10 +1162,9 @@ spec:
     #[test]
     fn run_edf_skips_pull_when_image_exists() {
         let mut raster = FakeRasterOps::new(sample_config());
-        raster.render_results.insert(
-            String::from("job.edf"),
-            Ok(sample_edf("alpine:3.22")),
-        );
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
         runtime.push_image_exists("alpine:3.22", vec![true]);
         let user = FakeUserContext {
@@ -1157,10 +1197,9 @@ spec:
     #[test]
     fn run_edf_pulls_missing_image_before_run() {
         let mut raster = FakeRasterOps::new(sample_config());
-        raster.render_results.insert(
-            String::from("job.edf"),
-            Ok(sample_edf("alpine:3.22")),
-        );
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
         runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
         let user = FakeUserContext {
@@ -1182,14 +1221,18 @@ spec:
 
         assert_eq!(output.return_code, 0);
         assert!(output.stdout.contains("Pulling alpine:3.22 with Podman"));
-        assert!(output.stdout.contains("Migrating alpine:3.22 with Parallax"));
+        assert!(
+            output
+                .stdout
+                .contains("Migrating alpine:3.22 with Parallax")
+        );
         assert_eq!(
             runtime.calls(),
             vec![
                 String::from("image_exists:alpine:3.22"),
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
-                String::from("info_graphroot"),
+                String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("run:alpine:3.22")
@@ -1246,7 +1289,7 @@ spec:
                 String::from("image_exists:alpine:3.22"),
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
-                String::from("info_graphroot"),
+                String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("image_exists:ubuntu:24.04"),
