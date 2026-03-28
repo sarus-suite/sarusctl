@@ -323,12 +323,15 @@ pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
     )
 }
 
-/// Context for listing images: default graphroot and Parallax imagestore as read-only additionalimagestore
-pub fn build_images_ctx(config: &Config, graphroot: PathBuf) -> PodmanCtx {
+/// Seed context for Parallax image-related operations (e.g. ls, migrate, rmi).
+/// Intended to have default graphroot and Parallax imagestore as read-only additionalimagestore.
+/// Functions using this should complete the context by resolving the default graphroot at runtime and setting it explicitly,
+/// because Parallax requires the graphroot to be passed as a CLI argument.
+pub fn build_parallax_seed_ctx(config: &Config) -> PodmanCtx {
     PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
         module: None,
-        graphroot: Some(graphroot),
+        graphroot: None,
         runroot: None,
         parallax_mount_program: None,
         ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
@@ -430,20 +433,15 @@ fn render_command(filepath: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppEr
 
 fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
     let config = deps.raster.load_config()?;
-    // TODO probably not necessary to have seed_ctx. Look code before refactoring
-    let seed_ctx = PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        module: None,
-        graphroot: None,
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        podman_env: None,
-    };
+    let seed_ctx = build_parallax_seed_ctx(&config);
+
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
     // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
     let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
-    let ctx = build_images_ctx(&config, graphroot);
+    let ctx = PodmanCtx {
+        graphroot: Some(graphroot),
+        ..seed_ctx
+    };
 
     if let Some(ro_store) = ctx.ro_store.as_deref()
         && !fs::exists(ro_store).map_err(|e| {
@@ -482,20 +480,15 @@ fn migrate_command(
     config: &Config,
     deps: &AppDeps<'_>,
 ) -> Result<AppOutput, AppError> {
-    // TODO probably not necessary to have seed_ctx. Look code before refactoring
-    let seed_ctx = PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        module: None,
-        graphroot: None,
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        podman_env: None,
-    };
+    let seed_ctx = build_parallax_seed_ctx(&config);
+
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
     // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
     let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
-    let ctx = build_images_ctx(config, graphroot);
+    let ctx = PodmanCtx {
+        graphroot: Some(graphroot),
+        ..seed_ctx
+    };
     let parallax_path = PathBuf::from(&config.parallax_path);
 
     deps.runtime.parallax_migrate(&parallax_path, &ctx, image)?;
@@ -511,20 +504,15 @@ fn migrate_command(
 }
 
 fn rmi_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
-    // TODO probably not necessary to have seed_ctx. Look code before refactoring
-    let seed_ctx = PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        module: None,
-        graphroot: None,
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        podman_env: None,
-    };
+    let seed_ctx = build_parallax_seed_ctx(&config);
+
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
     // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
     let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
-    let ctx = build_images_ctx(config, graphroot);
+    let ctx = PodmanCtx {
+        graphroot: Some(graphroot),
+        ..seed_ctx
+    };
     let parallax_path = PathBuf::from(&config.parallax_path);
 
     deps.runtime.parallax_rmi(&parallax_path, &ctx, image)?;
@@ -1050,7 +1038,8 @@ spec:
             },
         };
 
-        let output = execute_command(CommandSpec::Images, &mock_deps(&raster, &runtime, &user)).unwrap();
+        let output =
+            execute_command(CommandSpec::Images, &mock_deps(&raster, &runtime, &user)).unwrap();
 
         assert_eq!(output.return_code, 0);
         assert!(imagestore.exists());
