@@ -397,6 +397,8 @@ pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOu
         CommandSpec::Render { filepath, .. } => render_command(&filepath, deps),
         CommandSpec::Images => images_command(deps),
         CommandSpec::Pull { image } => {
+            // pull_command() and migrate_command() are also called internally by other functions,
+            // so they receive the config from the outside to avoid loading it multiple times.
             let config = deps.raster.load_config()?;
             pull_command(&image, &config, deps)
         }
@@ -404,10 +406,7 @@ pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOu
             let config = deps.raster.load_config()?;
             migrate_command(&image, &config, deps)
         }
-        CommandSpec::Rmi { image } => {
-            let config = deps.raster.load_config()?;
-            rmi_command(&image, &config, deps)
-        }
+        CommandSpec::Rmi { image } => rmi_command(&image, deps),
         CommandSpec::Run {
             filepath,
             container_cmd,
@@ -503,7 +502,8 @@ fn migrate_command(
     )))
 }
 
-fn rmi_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+fn rmi_command(image: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+    let config = deps.raster.load_config()?;
     let seed_ctx = build_parallax_seed_ctx(&config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
