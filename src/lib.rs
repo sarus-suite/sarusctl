@@ -1097,7 +1097,38 @@ spec:
         );
     }
 
-    // TODO add migrate success test. Probably similar to pull success test?
+    #[test]
+    fn migrate_success_runs_migration_steps() {
+        let config = sample_config();
+        let raster = FakeRasterOps::new(config);
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        let user = FakeUserContext {
+            user: CurrentUser {
+                uid: 1,
+                gid: 1,
+                username: String::from("user"),
+            },
+        };
+
+        let output = execute_command(
+            CommandSpec::Migrate {
+                image: String::from("alpine:3.22"),
+            },
+            &mock_deps(&raster, &runtime, &user),
+        )
+        .unwrap();
+
+        assert_eq!(output.return_code, 0);
+        assert_eq!(
+            runtime.calls(),
+            vec![
+                String::from("default_graphroot"),
+                String::from("migrate:alpine:3.22"),
+                String::from("image_exists:alpine:3.22")
+            ]
+        );
+    }
 
     #[test]
     fn migrate_failure_is_returned_as_runtime_error() {
@@ -1127,7 +1158,36 @@ spec:
         assert_eq!(err, AppError::Runtime(String::from("boom")));
     }
 
-    // TODO add rmi success test
+    #[test]
+    fn rmi_success_runs_removal_steps() {
+        let config = sample_config();
+        let raster = FakeRasterOps::new(config);
+        let runtime = FakeContainerRuntime::new();
+        let user = FakeUserContext {
+            user: CurrentUser {
+                uid: 1,
+                gid: 1,
+                username: String::from("user"),
+            },
+        };
+
+        let output = execute_command(
+            CommandSpec::Rmi {
+                image: String::from("alpine:3.22"),
+            },
+            &mock_deps(&raster, &runtime, &user),
+        )
+        .unwrap();
+
+        assert_eq!(output, AppOutput::success(""));
+        assert_eq!(
+            runtime.calls(),
+            vec![
+                String::from("default_graphroot"),
+                String::from("rmi:alpine:3.22")
+            ]
+        );
+    }
 
     #[test]
     fn rmi_failure_is_returned_as_runtime_error() {
