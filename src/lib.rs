@@ -390,10 +390,8 @@ fn collect_yaml_images(value: &yaml_serde::Value, images: &mut BTreeSet<String>)
 
 pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
     match command {
-        // TODO why do validate and render functions return AppOutput directly instead of Result<AppOutput, AppError>
-        // like the other commands? Look into it and consider unifying the approach for better consistency
-        CommandSpec::Validate { filepath, .. } => Ok(validate_command(&filepath, deps)),
-        CommandSpec::Render { filepath, .. } => Ok(render_command(&filepath, deps)),
+        CommandSpec::Validate { filepath, .. } => validate_command(&filepath, deps),
+        CommandSpec::Render { filepath, .. } => render_command(&filepath, deps),
         CommandSpec::Images => images_command(deps),
         CommandSpec::Pull { image } => {
             let config = deps.raster.load_config()?;
@@ -414,20 +412,20 @@ pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOu
     }
 }
 
-fn validate_command(filepath: &str, deps: &AppDeps<'_>) -> AppOutput {
-    match deps.raster.validate(filepath) {
+fn validate_command(filepath: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+    Ok(match deps.raster.validate(filepath) {
         Ok(_) => AppOutput::success(format!("{filepath} is a valid EDF file")),
         Err(err) => AppOutput::failure(format!("{filepath} is an INVALID EDF file"), err),
-    }
+    })
 }
 
-fn render_command(filepath: &str, deps: &AppDeps<'_>) -> AppOutput {
-    match deps.raster.render(filepath) {
+fn render_command(filepath: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+    Ok(match deps.raster.render(filepath) {
         Ok(edf) => AppOutput::success(
             serde_json::to_string_pretty(&edf).unwrap_or_else(|_| String::from("ERROR")),
         ),
         Err(err) => AppOutput::failure("", err),
-    }
+    })
 }
 
 fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
