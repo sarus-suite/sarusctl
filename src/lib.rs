@@ -359,12 +359,10 @@ fn collect_yaml_images(value: &yaml_serde::Value, images: &mut BTreeSet<String>)
             for (key, value) in mapping {
                 if matches!(key, yaml_serde::Value::String(s) if s == "image")
                     && matches!(value, yaml_serde::Value::String(_))
+                    && let yaml_serde::Value::String(image) = value
                 {
-                    if let yaml_serde::Value::String(image) = value {
-                        images.insert(image.clone());
-                    }
+                    images.insert(image.clone());
                 }
-
                 collect_yaml_images(value, images);
             }
         }
@@ -465,7 +463,7 @@ fn migrate_command(
     config: &Config,
     deps: &AppDeps<'_>,
 ) -> Result<AppOutput, AppError> {
-    let seed_ctx = build_parallax_seed_ctx(&config);
+    let seed_ctx = build_parallax_seed_ctx(config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
     // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
@@ -662,10 +660,7 @@ mod tests {
         }
 
         fn validate(&self, path: &str) -> Result<(), String> {
-            self.validate_results
-                .get(path)
-                .cloned()
-                .unwrap_or_else(|| Ok(()))
+            self.validate_results.get(path).cloned().unwrap_or(Ok(()))
         }
 
         fn render(&self, path: &str) -> Result<EDF, String> {
