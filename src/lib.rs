@@ -125,7 +125,6 @@ impl std::error::Error for AppError {}
 pub struct CurrentUser {
     pub uid: u32,
     pub gid: u32,
-    pub username: String,
 }
 
 pub trait UserContext {
@@ -271,26 +270,15 @@ impl UserContext for RealUserContext {
     fn current_user(&self) -> Result<CurrentUser, AppError> {
         let uid = users::get_current_uid();
         let gid = users::get_current_gid();
-        let username = users::get_user_by_uid(uid)
-            .ok_or_else(|| {
-                AppError::UserLookup(String::from(
-                    "Failed to resolve current user from passwd database",
-                ))
-            })?
-            .name()
-            .to_string_lossy()
-            .into_owned();
 
-        Ok(CurrentUser { uid, gid, username })
+        Ok(CurrentUser { uid, gid })
     }
 }
 
 /// Context for running containers. Fully custom Sarus Suite parameters (Podman module, Parallax imagestore, etc.).
 /// Uses sarusctl-specific graphroot and runroot to not tamper with default podman rootdirs
 pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
-    let roots_base = PathBuf::from("/dev/shm")
-        .join(&user.username)
-        .join("sarusctl");
+    let roots_base = PathBuf::from("/dev/shm").join(format!("sarusctl-{}", user.uid));
 
     PodmanCtx {
         podman_path: PathBuf::from(&config.podman_path),
@@ -891,18 +879,17 @@ spec:
         let user = CurrentUser {
             uid: 1234,
             gid: 4321,
-            username: String::from("alice"),
         };
 
         let run = build_run_ctx(&config, &user);
         assert_eq!(run.module, Some(String::from("hpc")));
         assert_eq!(
             run.graphroot,
-            Some(PathBuf::from("/dev/shm/alice/sarusctl/graphroot"))
+            Some(PathBuf::from("/dev/shm/sarusctl-1234/graphroot"))
         );
         assert_eq!(
             run.runroot,
-            Some(PathBuf::from("/dev/shm/alice/sarusctl/runroot"))
+            Some(PathBuf::from("/dev/shm/sarusctl-1234/runroot"))
         );
         let env = run.podman_env.expect("missing env");
         assert_eq!(env.get(OsStr::new("PARALLAX_MP_UID")).unwrap(), "1234");
@@ -918,11 +905,7 @@ spec:
         let raster = FakeRasterOps::new(sample_config());
         let runtime = FakeContainerRuntime::new();
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output = execute_command(
@@ -947,11 +930,7 @@ spec:
         );
         let runtime = FakeContainerRuntime::new();
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output = execute_command(
@@ -976,11 +955,7 @@ spec:
             .insert(String::from("valid.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output = execute_command(
@@ -1006,11 +981,7 @@ spec:
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output =
@@ -1031,11 +1002,7 @@ spec:
         let runtime = FakeContainerRuntime::new();
         runtime.push_image_exists("alpine:3.22", vec![true, true]);
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output = execute_command(
@@ -1066,11 +1033,7 @@ spec:
         let runtime = FakeContainerRuntime::new();
         runtime.push_image_exists("alpine:3.22", vec![true]);
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output = execute_command(
@@ -1102,11 +1065,7 @@ spec:
             Err(AppError::Runtime(String::from("boom"))),
         );
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let err = execute_command(
@@ -1126,11 +1085,7 @@ spec:
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output = execute_command(
@@ -1161,11 +1116,7 @@ spec:
             Err(AppError::Runtime(String::from("boom"))),
         );
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let err = execute_command(
@@ -1188,11 +1139,7 @@ spec:
         let runtime = FakeContainerRuntime::new();
         runtime.push_image_exists("alpine:3.22", vec![true]);
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output = execute_command(
@@ -1223,11 +1170,7 @@ spec:
         let runtime = FakeContainerRuntime::new();
         runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output = execute_command(
@@ -1269,11 +1212,7 @@ spec:
             Err(AppError::Runtime(String::from("registry offline"))),
         );
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let err = execute_command(
@@ -1321,11 +1260,7 @@ spec:
         runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
         runtime.push_image_exists("ubuntu:24.04", vec![true]);
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let output = execute_command(
@@ -1381,11 +1316,7 @@ spec:
             Err(AppError::Runtime(String::from("parallax broke"))),
         );
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let err = execute_command(
@@ -1423,11 +1354,7 @@ spec:
         );
         let runtime = FakeContainerRuntime::new();
         let user = FakeUserContext {
-            user: CurrentUser {
-                uid: 1,
-                gid: 1,
-                username: String::from("user"),
-            },
+            user: CurrentUser { uid: 1, gid: 1 },
         };
 
         let err = execute_command(
