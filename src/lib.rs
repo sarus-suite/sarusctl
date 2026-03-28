@@ -297,6 +297,32 @@ pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
     )
 }
 
+fn cleanup_podman_rootdirs(run_ctx: &PodmanCtx) -> Option<String> {
+    let roots_base = run_ctx
+        .graphroot
+        .as_ref()
+        .and_then(|graphroot| graphroot.parent().map(Path::to_path_buf))
+        .or_else(|| {
+            run_ctx
+                .runroot
+                .as_ref()
+                .and_then(|runroot| runroot.parent().map(Path::to_path_buf))
+        });
+
+    let Some(roots_base) = roots_base else {
+        return None;
+    };
+
+    match fs::remove_dir_all(&roots_base) {
+        Ok(()) => None,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => Some(format!(
+            "Warning: failed to remove temporary directory for Podman rootdirs {}: {err}",
+            roots_base.display()
+        )),
+    }
+}
+
 /// Seed context for Parallax image-related operations (e.g. ls, migrate, rmi).
 /// Intended to have default graphroot and Parallax imagestore as read-only additionalimagestore.
 /// Functions using this should complete the context by resolving the default graphroot at runtime and setting it explicitly,
@@ -540,10 +566,25 @@ fn run_edf_command(
         pidfile: None,
     };
 
-    output.return_code = deps
+    let run_result = deps
         .runtime
-        .run_from_edf(edf, &run_ctx, &c_ctx, container_cmd)?;
-    // TODO evaluate whether we can do some cleanup of podman rootdirs when run_from_edf returns so we can have non-persistent graphroot/runroot for runs, removing the need to have human-understandable paths for them. The intent then would be to create them inside something like /dev/shm/sarusctl-{uid}/ (removed afterwards) and skip the resolution of full username from uid, which is problematic when statically compiling with musl libc (does not access LDAP/NSS in system with centralized identity management)
+        .run_from_edf(edf, &run_ctx, &c_ctx, container_cmd);
+    let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
+
+    // Append warning to error in case of run failure
+    output.return_code = match run_result {
+        Ok(return_code) => return_code,
+        Err(err) => {
+            return Err(match cleanup_warning {
+                Some(warning) => combine_error_with_warning(err, warning),
+                None => err,
+            });
+        }
+    };
+    // Append warning to output in case of run success
+    if let Some(warning) = cleanup_warning {
+        append_warning(&mut output, warning);
+    }
     Ok(output)
 }
 
@@ -566,10 +607,22 @@ fn run_yaml_command(
         }
     }
 
-    deps.runtime.kube_play(filepath, &run_ctx)?;
+    let play_result = deps.runtime.kube_play(filepath, &run_ctx);
     // TODO podman exec user command into container marked with specific extension
     // TODO tear down pod with kube_down after user command completes, and report any errors from that as well
-    // TODO cleanup sarusct custom rootdirs
+    let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
+
+    // Append warning to error in case of run failure
+    if let Err(err) = play_result {
+        return Err(match cleanup_warning {
+            Some(warning) => combine_error_with_warning(err, warning),
+            None => err,
+        });
+    }
+    // Append warning to output in case of run success
+    if let Some(warning) = cleanup_warning {
+        append_warning(&mut output, warning);
+    }
     Ok(output)
 }
 
@@ -591,6 +644,17 @@ fn merge_output(base: &mut AppOutput, extra: AppOutput) {
     if extra.return_code != 0 {
         base.return_code = extra.return_code;
     }
+}
+
+fn append_warning(output: &mut AppOutput, warning: String) {
+    if !output.stderr.is_empty() {
+        output.stderr.push('\n');
+    }
+    output.stderr.push_str(&warning);
+}
+
+fn combine_error_with_warning(err: AppError, warning: String) -> AppError {
+    AppError::Runtime(format!("{err}\n{warning}"))
 }
 
 #[cfg(test)]
