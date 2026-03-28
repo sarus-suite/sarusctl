@@ -714,7 +714,6 @@ mod tests {
         }
     }
 
-    // TODO explain why do you need RefCells instead of plain datatypes
     struct FakeContainerRuntime {
         calls: RefCell<Vec<String>>,
         graphroot: Result<PathBuf, AppError>,
@@ -826,8 +825,7 @@ mod tests {
         }
     }
 
-    // TODO: Why a function instead of a direct struct initialization?
-    fn deps<'a>(
+    fn mock_deps<'a>(
         raster: &'a dyn RasterOps,
         runtime: &'a dyn ContainerRuntime,
         user: &'a dyn UserContext,
@@ -971,7 +969,7 @@ spec:
                 filepath: String::from("valid.edf"),
                 output: FormatOutput::Text,
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap();
 
@@ -1000,7 +998,7 @@ spec:
                 filepath: String::from("invalid.edf"),
                 output: FormatOutput::Text,
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap();
 
@@ -1029,7 +1027,7 @@ spec:
                 filepath: String::from("valid.edf"),
                 output: FormatOutput::Text,
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap();
 
@@ -1054,7 +1052,7 @@ spec:
             },
         };
 
-        let output = execute_command(CommandSpec::Images, &deps(&raster, &runtime, &user)).unwrap();
+        let output = execute_command(CommandSpec::Images, &mock_deps(&raster, &runtime, &user)).unwrap();
 
         assert_eq!(output.return_code, 0);
         assert!(imagestore.exists());
@@ -1082,7 +1080,7 @@ spec:
             CommandSpec::Pull {
                 image: String::from("alpine:3.22"),
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap();
 
@@ -1122,7 +1120,7 @@ spec:
             CommandSpec::Migrate {
                 image: String::from("alpine:3.22"),
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap_err();
 
@@ -1152,7 +1150,7 @@ spec:
             CommandSpec::Rmi {
                 image: String::from("alpine:3.22"),
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap_err();
 
@@ -1180,7 +1178,7 @@ spec:
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("sh")],
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap();
 
@@ -1215,7 +1213,7 @@ spec:
                 filepath: String::from("job.edf"),
                 container_cmd: vec![String::from("sh")],
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap();
 
@@ -1278,7 +1276,7 @@ spec:
                 filepath: manifest.to_string_lossy().into_owned(),
                 container_cmd: vec![],
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap();
 
@@ -1323,7 +1321,7 @@ spec:
                 filepath: input.to_string_lossy().into_owned(),
                 container_cmd: vec![],
             },
-            &deps(&raster, &runtime, &user),
+            &mock_deps(&raster, &runtime, &user),
         )
         .unwrap_err();
 
