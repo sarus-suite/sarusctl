@@ -215,7 +215,7 @@ impl ContainerRuntime for RealContainerRuntime {
             Ok(())
         } else {
             Err(AppError::Runtime(format!(
-                "Failed pulling image {image}: {}",
+                "Failed to pull image {image}: {}",
                 String::from_utf8_lossy(&out.output.stderr).trim()
             )))
         }
@@ -282,20 +282,6 @@ impl UserContext for RealUserContext {
             .into_owned();
 
         Ok(CurrentUser { uid, gid, username })
-    }
-}
-
-/// Context which uses the Parallax imagestore (normally a read-only additionalimagestore location) as graphroot.
-/// Mostly useful to check if an image exists in the Parallax store, and therefore if it needs pulling or not.
-pub fn build_readonly_ctx(config: &Config) -> PodmanCtx {
-    PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        module: None,
-        graphroot: Some(PathBuf::from(&config.parallax_imagestore)),
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: None,
-        podman_env: None,
     }
 }
 
@@ -469,7 +455,7 @@ fn pull_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppO
         )));
     }
 
-    let mut output = AppOutput::success(format!("Pulling {image} with Podman"));
+    let mut output = AppOutput::success(format!("Pulled {image} with Podman"));
     merge_output(&mut output, migrate_command(image, config, deps)?);
     Ok(output)
 }
@@ -498,7 +484,7 @@ fn migrate_command(
     }
 
     Ok(AppOutput::success(format!(
-        "Migrating {image} with Parallax"
+        "Migrated {image} with Parallax"
     )))
 }
 
@@ -551,13 +537,12 @@ fn run_edf_command(
     deps: &AppDeps<'_>,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
-    let ro_ctx = build_readonly_ctx(config);
     let run_ctx = build_run_ctx(config, &user);
     let mut output = AppOutput::success("");
 
-    if !deps.runtime.image_exists(&edf.image, &ro_ctx)? {
+    // TODO checking image existence with the run_ctx means that sarusctl custom rootdirs will be created right here. Ensure proper cleanup of graphroot/runroot and parent in case of failure
+    if !deps.runtime.image_exists(&edf.image, &run_ctx)? {
         merge_output(&mut output, pull_command(&edf.image, config, deps)?);
-        // TODO more robust error handling and reporting if pull or migrate fails, to avoid trying to run with a missing image
     }
 
     let container_name = format!("sarusctl-{}", &Uuid::new_v4().simple().to_string()[..8]);
@@ -572,6 +557,7 @@ fn run_edf_command(
     output.return_code = deps
         .runtime
         .run_from_edf(edf, &run_ctx, &c_ctx, container_cmd)?;
+    // TODO evaluate whether we can do some cleanup of podman rootdirs when run_from_edf returns so we can have non-persistent graphroot/runroot for runs, removing the need to have human-understandable paths for them. The intent then would be to create them inside something like /dev/shm/sarusctl-{uid}/ (removed afterwards) and skip the resolution of full username from uid, which is problematic when statically compiling with musl libc (does not access LDAP/NSS in system with centralized identity management)
     Ok(output)
 }
 
@@ -581,7 +567,6 @@ fn run_yaml_command(
     deps: &AppDeps<'_>,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
-    let ro_ctx = build_readonly_ctx(config);
     let mut run_ctx = build_run_ctx(config, &user);
     run_ctx.module = None;
 
@@ -589,15 +574,16 @@ fn run_yaml_command(
     let mut output = AppOutput::success("");
 
     for image in images {
-        if !deps.runtime.image_exists(&image, &ro_ctx)? {
+        // TODO checking image existence with the run_ctx means that sarusctl custom rootdirs will be created right here. Ensure proper cleanup of graphroot/runroot and parent in case of failure
+        if !deps.runtime.image_exists(&image, &run_ctx)? {
             merge_output(&mut output, pull_command(&image, config, deps)?);
-            // TODO more robust error handling and reporting if pull or migrate fails, to avoid trying to run with missing images
         }
     }
 
     deps.runtime.kube_play(filepath, &run_ctx)?;
     // TODO podman exec user command into container marked with specific extension
     // TODO tear down pod with kube_down after user command completes, and report any errors from that as well
+    // TODO cleanup sarusct custom rootdirs
     Ok(output)
 }
 
@@ -912,12 +898,6 @@ spec:
             gid: 4321,
             username: String::from("alice"),
         };
-
-        let ro = build_readonly_ctx(&config);
-        assert_eq!(
-            ro.graphroot,
-            Some(PathBuf::from("/scratch/user/parallax/store"))
-        );
 
         let run = build_run_ctx(&config, &user);
         assert_eq!(run.module, Some(String::from("hpc")));
@@ -1265,12 +1245,8 @@ spec:
         .unwrap();
 
         assert_eq!(output.return_code, 0);
-        assert!(output.stdout.contains("Pulling alpine:3.22 with Podman"));
-        assert!(
-            output
-                .stdout
-                .contains("Migrating alpine:3.22 with Parallax")
-        );
+        assert!(output.stdout.contains("Pulled alpine:3.22 with Podman"));
+        assert!(output.stdout.contains("Migrated alpine:3.22 with Parallax"));
         assert_eq!(
             runtime.calls(),
             vec![
@@ -1281,6 +1257,45 @@ spec:
                 String::from("migrate:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("run:alpine:3.22")
+            ]
+        );
+    }
+
+    #[test]
+    fn run_edf_fails_before_run_when_pull_fails() {
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_image_exists("alpine:3.22", vec![false]);
+        runtime.pull_results.borrow_mut().insert(
+            String::from("alpine:3.22"),
+            Err(AppError::Runtime(String::from("registry offline"))),
+        );
+        let user = FakeUserContext {
+            user: CurrentUser {
+                uid: 1,
+                gid: 1,
+                username: String::from("user"),
+            },
+        };
+
+        let err = execute_command(
+            CommandSpec::Run {
+                filepath: String::from("job.edf"),
+                container_cmd: vec![String::from("sh")],
+            },
+            &mock_deps(&raster, &runtime, &user),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, AppError::Runtime(String::from("registry offline")));
+        assert_eq!(
+            runtime.calls(),
+            vec![
+                String::from("image_exists:alpine:3.22"),
+                String::from("pull:alpine:3.22")
             ]
         );
     }
@@ -1339,6 +1354,63 @@ spec:
                 String::from("image_exists:alpine:3.22"),
                 String::from("image_exists:ubuntu:24.04"),
                 format!("kube_play:{}", manifest.to_string_lossy())
+            ]
+        );
+    }
+
+    #[test]
+    fn run_yaml_fails_before_kube_play_when_migration_fails() {
+        let temp = tempdir().unwrap();
+        let manifest = temp.path().join("pod.yaml");
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - image: alpine:3.22
+"#,
+        )
+        .unwrap();
+
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster.render_results.insert(
+            manifest.to_string_lossy().into_owned(),
+            Err(String::from("not an edf")),
+        );
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_image_exists("alpine:3.22", vec![false, true]);
+        runtime.migrate_results.borrow_mut().insert(
+            String::from("alpine:3.22"),
+            Err(AppError::Runtime(String::from("parallax broke"))),
+        );
+        let user = FakeUserContext {
+            user: CurrentUser {
+                uid: 1,
+                gid: 1,
+                username: String::from("user"),
+            },
+        };
+
+        let err = execute_command(
+            CommandSpec::Run {
+                filepath: manifest.to_string_lossy().into_owned(),
+                container_cmd: vec![],
+            },
+            &mock_deps(&raster, &runtime, &user),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, AppError::Runtime(String::from("parallax broke")));
+        assert_eq!(
+            runtime.calls(),
+            vec![
+                String::from("image_exists:alpine:3.22"),
+                String::from("pull:alpine:3.22"),
+                String::from("image_exists:alpine:3.22"),
+                String::from("default_graphroot"),
+                String::from("migrate:alpine:3.22"),
             ]
         );
     }
