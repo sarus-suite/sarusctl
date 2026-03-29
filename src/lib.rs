@@ -298,6 +298,9 @@ pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
 }
 
 fn cleanup_podman_rootdirs(run_ctx: &PodmanCtx) -> Option<String> {
+    const CLEANUP_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+    const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
     let roots_base = run_ctx
         .graphroot
         .as_ref()
@@ -309,17 +312,64 @@ fn cleanup_podman_rootdirs(run_ctx: &PodmanCtx) -> Option<String> {
                 .and_then(|runroot| runroot.parent().map(Path::to_path_buf))
         });
 
-    let Some(roots_base) = roots_base else {
-        return None;
-    };
+    let roots_base = roots_base?;
 
-    match fs::remove_dir_all(&roots_base) {
-        Ok(()) => None,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => Some(format!(
-            "Warning: failed to remove temporary directory for Podman rootdirs {}: {err}",
-            roots_base.display()
-        )),
+    // TODO candidate for verbose mode: println!("Cleaning up Podman rootdirs at {}", roots_base.display());
+    let start = Instant::now();
+    let mut last_remove_error = String::new();
+
+    // Empyrical testing observed that Podman rootdirs can reappear after being removed,
+    // likely due to some cleanup process in Podman that runs asynchronously after container termination.
+    // To handle this, we attempt to remove the rootdirs and then check for their existence in a loop with a timeout,
+    // instead of assuming that a single remove_dir_all will be sufficient.
+    loop {
+        match fs::remove_dir_all(&roots_base) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(err) => last_remove_error = err.to_string(),
+        }
+
+        std::thread::sleep(CLEANUP_RETRY_INTERVAL);
+
+        if !roots_base.exists() {
+            return None;
+        }
+
+        let elapsed = start.elapsed();
+        if elapsed >= CLEANUP_TIMEOUT {
+            let details = describe_dir_entries(&roots_base);
+            return Some(if last_remove_error.is_empty() {
+                format!(
+                    "Warning: Podman rootdirs {} still exist after {} ms of cleanup retries; {details}",
+                    roots_base.display(),
+                    elapsed.as_millis()
+                )
+            } else {
+                format!(
+                    "Warning: Podman rootdirs {} still exist after {} ms of cleanup retries; last remove_dir_all error: {err}; {details}",
+                    roots_base.display(),
+                    elapsed.as_millis(),
+                    err = last_remove_error
+                )
+            });
+        }
+    }
+}
+
+fn describe_dir_entries(path: &Path) -> String {
+    let entries = fs::read_dir(path)
+        .ok()
+        .map(|iter| {
+            iter.filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if entries.is_empty() {
+        String::from("directory is empty")
+    } else {
+        format!("remaining entries: {}", entries.join(", "))
     }
 }
 
