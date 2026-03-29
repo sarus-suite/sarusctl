@@ -664,6 +664,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::ffi::OsStr;
+    use std::io::ErrorKind;
     use tempfile::tempdir;
 
     fn sample_config() -> Config {
@@ -853,6 +854,25 @@ mod tests {
             raster,
             runtime,
             user,
+        }
+    }
+
+    fn unique_test_user() -> CurrentUser {
+        CurrentUser {
+            uid: Uuid::new_v4().as_u128() as u32,
+            gid: 1,
+        }
+    }
+
+    fn ensure_clean_rootdirs(user: &CurrentUser) {
+        let roots_base = PathBuf::from("/dev/shm").join(format!("sarusctl-{}", user.uid));
+        if let Err(err) = fs::remove_dir_all(&roots_base) {
+            assert_eq!(
+                err.kind(),
+                ErrorKind::NotFound,
+                "failed to remove stale test rootdirs {}: {err}",
+                roots_base.display()
+            );
         }
     }
 
@@ -1264,6 +1284,41 @@ spec:
     }
 
     #[test]
+    fn run_edf_removes_rootdirs_after_run() {
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        let user = unique_test_user();
+        ensure_clean_rootdirs(&user);
+        let run_ctx = build_run_ctx(&sample_config(), &user);
+        let roots_base = run_ctx.graphroot.unwrap().parent().unwrap().to_path_buf();
+        fs::create_dir_all(roots_base.join("graphroot")).unwrap();
+        fs::create_dir_all(roots_base.join("runroot")).unwrap();
+        assert!(roots_base.exists());
+
+        let output = execute_command(
+            CommandSpec::Run {
+                filepath: String::from("job.edf"),
+                container_cmd: vec![String::from("sh")],
+            },
+            &mock_deps(&raster, &runtime, &FakeUserContext { user: user.clone() }),
+        )
+        .unwrap();
+
+        assert_eq!(output.return_code, 0);
+        if roots_base.exists() {
+            ensure_clean_rootdirs(&user);
+            panic!(
+                "Podman rootdirs were not removed after EDF run: {}",
+                roots_base.display()
+            );
+        }
+    }
+
+    #[test]
     fn run_edf_fails_before_run_when_pull_fails() {
         let mut raster = FakeRasterOps::new(sample_config());
         raster
@@ -1403,6 +1458,57 @@ spec:
                 String::from("migrate:alpine:3.22"),
             ]
         );
+    }
+
+    #[test]
+    fn run_yaml_removes_rootdirs_after_kube_play() {
+        let temp = tempdir().unwrap();
+        let manifest = temp.path().join("pod.yaml");
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - image: alpine:3.22
+"#,
+        )
+        .unwrap();
+
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster.render_results.insert(
+            manifest.to_string_lossy().into_owned(),
+            Err(String::from("not an edf")),
+        );
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        let user = unique_test_user();
+        ensure_clean_rootdirs(&user);
+        let mut run_ctx = build_run_ctx(&sample_config(), &user);
+        run_ctx.module = None;
+        let roots_base = run_ctx.graphroot.unwrap().parent().unwrap().to_path_buf();
+        fs::create_dir_all(roots_base.join("graphroot")).unwrap();
+        fs::create_dir_all(roots_base.join("runroot")).unwrap();
+        assert!(roots_base.exists());
+
+        let output = execute_command(
+            CommandSpec::Run {
+                filepath: manifest.to_string_lossy().into_owned(),
+                container_cmd: vec![],
+            },
+            &mock_deps(&raster, &runtime, &FakeUserContext { user: user.clone() }),
+        )
+        .unwrap();
+
+        assert_eq!(output.return_code, 0);
+        if roots_base.exists() {
+            ensure_clean_rootdirs(&user);
+            panic!(
+                "Podman rootdirs were not removed after YAML run: {}",
+                roots_base.display()
+            );
+        }
     }
 
     #[test]
