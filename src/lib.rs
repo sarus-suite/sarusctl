@@ -276,6 +276,51 @@ impl UserContext for RealUserContext {
     }
 }
 
+/// Context for pulling images with Podman, essentially equivalent to native Podman configuration
+fn build_pull_ctx(config: &Config) -> PodmanCtx {
+    PodmanCtx {
+        podman_path: PathBuf::from(&config.podman_path),
+        module: None,
+        graphroot: None,
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: None,
+        podman_env: None,
+    }
+}
+
+/// Seed context for Parallax image-related operations (e.g. ls, migrate, rmi).
+/// Intended to have default graphroot and Parallax imagestore as read-only additionalimagestore.
+/// Functions using this should complete the context by resolving the default graphroot at runtime and setting it explicitly,
+/// because Parallax requires the graphroot to be passed as a CLI argument.
+pub fn build_parallax_seed_ctx(config: &Config) -> PodmanCtx {
+    PodmanCtx {
+        podman_path: PathBuf::from(&config.podman_path),
+        module: None,
+        graphroot: None,
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
+        podman_env: None,
+    }
+}
+
+/// Context which uses the Parallax imagestore (normally a read-only additionalimagestore location) as graphroot.
+/// This should be used only for read actions, since the Parallax store is not intended to be manipulated directly by Podman.
+/// This context is mostly useful to check if an image exists in the Parallax store (and therefore if it needs pulling or not)
+/// without using the run_ctx, which would trigger creation of custom Podman rootdirs and require cleanup in case of errors before run.
+pub fn build_readonly_ctx(config: &Config) -> PodmanCtx {
+    PodmanCtx {
+        podman_path: PathBuf::from(&config.podman_path),
+        module: None,
+        graphroot: Some(PathBuf::from(&config.parallax_imagestore)),
+        runroot: None,
+        parallax_mount_program: None,
+        ro_store: None,
+        podman_env: None,
+    }
+}
+
 /// Context for running containers. Fully custom Sarus Suite parameters (Podman module, Parallax imagestore, etc.).
 /// Uses sarusctl-specific graphroot and runroot to not tamper with default podman rootdirs
 pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
@@ -371,35 +416,6 @@ fn describe_dir_entries(path: &Path) -> String {
         String::from("directory is empty")
     } else {
         format!("remaining entries: {}", entries.join(", "))
-    }
-}
-
-/// Seed context for Parallax image-related operations (e.g. ls, migrate, rmi).
-/// Intended to have default graphroot and Parallax imagestore as read-only additionalimagestore.
-/// Functions using this should complete the context by resolving the default graphroot at runtime and setting it explicitly,
-/// because Parallax requires the graphroot to be passed as a CLI argument.
-pub fn build_parallax_seed_ctx(config: &Config) -> PodmanCtx {
-    PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        module: None,
-        graphroot: None,
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: Some(PathBuf::from(&config.parallax_imagestore)),
-        podman_env: None,
-    }
-}
-
-/// Context for pulling images with Podman, essentially equivalent to native Podman configuration
-fn build_pull_ctx(config: &Config) -> PodmanCtx {
-    PodmanCtx {
-        podman_path: PathBuf::from(&config.podman_path),
-        module: None,
-        graphroot: None,
-        runroot: None,
-        parallax_mount_program: None,
-        ro_store: None,
-        podman_env: None,
     }
 }
 
@@ -600,11 +616,11 @@ fn run_edf_command(
     deps: &AppDeps<'_>,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
+    let ro_ctx = build_readonly_ctx(config);
     let run_ctx = build_run_ctx(config, &user);
     let mut output = AppOutput::success("");
 
-    // TODO checking image existence with the run_ctx means that sarusctl custom rootdirs will be created right here. Ensure proper cleanup of graphroot/runroot and parent in case of failure
-    if !deps.runtime.image_exists(&edf.image, &run_ctx)? {
+    if !deps.runtime.image_exists(&edf.image, &ro_ctx)? {
         merge_output(&mut output, pull_command(&edf.image, config, deps)?);
     }
 
@@ -645,6 +661,7 @@ fn run_yaml_command(
     deps: &AppDeps<'_>,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
+    let ro_ctx = build_readonly_ctx(config);
     let mut run_ctx = build_run_ctx(config, &user);
     run_ctx.module = None;
 
@@ -652,8 +669,7 @@ fn run_yaml_command(
     let mut output = AppOutput::success("");
 
     for image in images {
-        // TODO checking image existence with the run_ctx means that sarusctl custom rootdirs will be created right here. Ensure proper cleanup of graphroot/runroot and parent in case of failure
-        if !deps.runtime.image_exists(&image, &run_ctx)? {
+        if !deps.runtime.image_exists(&image, &ro_ctx)? {
             merge_output(&mut output, pull_command(&image, config, deps)?);
         }
     }
@@ -1016,7 +1032,25 @@ spec:
             gid: 4321,
         };
 
+        let pull = build_pull_ctx(&config);
+        assert_eq!(pull.podman_path, PathBuf::from("/usr/bin/podman"));
+
+        let seed = build_parallax_seed_ctx(&config);
+        assert_eq!(seed.podman_path, PathBuf::from("/usr/bin/podman"));
+        assert_eq!(
+            seed.ro_store,
+            Some(PathBuf::from("/scratch/user/parallax/store"))
+        );
+
+        let ro = build_readonly_ctx(&config);
+        assert_eq!(ro.podman_path, PathBuf::from("/usr/bin/podman"));
+        assert_eq!(
+            ro.graphroot,
+            Some(PathBuf::from("/scratch/user/parallax/store"))
+        );
+
         let run = build_run_ctx(&config, &user);
+        assert_eq!(run.podman_path, PathBuf::from("/usr/bin/podman"));
         assert_eq!(run.module, Some(String::from("hpc")));
         assert_eq!(
             run.graphroot,
@@ -1025,6 +1059,10 @@ spec:
         assert_eq!(
             run.runroot,
             Some(PathBuf::from("/dev/shm/sarusctl-1234/runroot"))
+        );
+        assert_eq!(
+            seed.ro_store,
+            Some(PathBuf::from("/scratch/user/parallax/store"))
         );
         let env = run.podman_env.expect("missing env");
         assert_eq!(env.get(OsStr::new("PARALLAX_MP_UID")).unwrap(), "1234");
