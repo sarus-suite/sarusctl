@@ -11,6 +11,11 @@ use std::str;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExecOptions {
+    pub verbose: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum FormatOutput {
     Text,
@@ -142,19 +147,21 @@ pub trait RasterOps {
 pub trait ContainerRuntime {
     fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError>;
     fn images(&self, ctx: &PodmanCtx) -> Result<(), AppError>;
-    fn pull(&self, image: &str, ctx: &PodmanCtx) -> Result<(), AppError>;
+    fn pull(&self, image: &str, ctx: &PodmanCtx, verbose: bool) -> Result<(), AppError>;
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError>;
     fn parallax_migrate(
         &self,
         parallax_path: &Path,
         ctx: &PodmanCtx,
         image: &str,
+        verbose: bool,
     ) -> Result<(), AppError>;
     fn parallax_rmi(
         &self,
         parallax_path: &Path,
         ctx: &PodmanCtx,
         image: &str,
+        verbose: bool,
     ) -> Result<(), AppError>;
     fn run_from_edf(
         &self,
@@ -210,15 +217,24 @@ impl ContainerRuntime for RealContainerRuntime {
         Ok(())
     }
 
-    fn pull(&self, image: &str, ctx: &PodmanCtx) -> Result<(), AppError> {
-        let out = pmd::loggable::pull(image, Some(ctx));
-        if out.output.status.success() {
-            Ok(())
+    fn pull(&self, image: &str, ctx: &PodmanCtx, verbose: bool) -> Result<(), AppError> {
+        if verbose {
+            let status = pmd::pull_streaming(image, Some(ctx));
+            if status.success() {
+                Ok(())
+            } else {
+                Err(AppError::Runtime(format!("Failed to pull image {image}")))
+            }
         } else {
-            Err(AppError::Runtime(format!(
-                "Failed to pull image {image}: {}",
-                String::from_utf8_lossy(&out.output.stderr).trim()
-            )))
+            let out = pmd::loggable::pull(image, Some(ctx));
+            if out.output.status.success() {
+                Ok(())
+            } else {
+                Err(AppError::Runtime(format!(
+                    "Failed to pull image {image}: {}",
+                    String::from_utf8_lossy(&out.output.stderr).trim()
+                )))
+            }
         }
     }
 
@@ -231,9 +247,15 @@ impl ContainerRuntime for RealContainerRuntime {
         parallax_path: &Path,
         ctx: &PodmanCtx,
         image: &str,
+        verbose: bool,
     ) -> Result<(), AppError> {
-        pmd::parallax_migrate(&parallax_path.to_path_buf(), ctx, image)
-            .map_err(|e| AppError::Runtime(format!("Failed migrating parallax: {e}")))
+        if verbose {
+            pmd::parallax_migrate_streaming(&parallax_path.to_path_buf(), ctx, image)
+                .map_err(|_| AppError::Runtime(format!("Failed to migrate image {image}")))
+        } else {
+            pmd::parallax_migrate(&parallax_path.to_path_buf(), ctx, image)
+                .map_err(|e| AppError::Runtime(format!("Failed to migrate image {image}: {e}")))
+        }
     }
 
     fn parallax_rmi(
@@ -241,9 +263,21 @@ impl ContainerRuntime for RealContainerRuntime {
         parallax_path: &Path,
         ctx: &PodmanCtx,
         image: &str,
+        verbose: bool,
     ) -> Result<(), AppError> {
-        pmd::parallax_rmi(&parallax_path.to_path_buf(), ctx, image)
-            .map_err(|e| AppError::Runtime(format!("Failed removing image from parallax: {e}")))
+        if verbose {
+            pmd::parallax_rmi_streaming(&parallax_path.to_path_buf(), ctx, image).map_err(|_| {
+                AppError::Runtime(format!(
+                    "Failed to remove image {image} from Parallax imagestore"
+                ))
+            })
+        } else {
+            pmd::parallax_rmi(&parallax_path.to_path_buf(), ctx, image).map_err(|e| {
+                AppError::Runtime(format!(
+                    "Failed to remove image {image} from Parallax imagestore: {e}"
+                ))
+            })
+        }
     }
 
     fn run_from_edf(
@@ -458,6 +492,14 @@ fn collect_yaml_images(value: &yaml_serde::Value, images: &mut BTreeSet<String>)
 }
 
 pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+    execute_command_with_options(command, deps, ExecOptions::default())
+}
+
+pub fn execute_command_with_options(
+    command: CommandSpec,
+    deps: &AppDeps<'_>,
+    options: ExecOptions,
+) -> Result<AppOutput, AppError> {
     match command {
         CommandSpec::Validate { filepath, .. } => validate_command(&filepath, deps),
         CommandSpec::Render { filepath, .. } => render_command(&filepath, deps),
@@ -466,17 +508,17 @@ pub fn execute_command(command: CommandSpec, deps: &AppDeps<'_>) -> Result<AppOu
             // pull_command() and migrate_command() are also called internally by other functions,
             // so they receive the config from the outside to avoid loading it multiple times.
             let config = deps.raster.load_config()?;
-            pull_command(&image, &config, deps)
+            pull_command(&image, &config, deps, options)
         }
         CommandSpec::Migrate { image } => {
             let config = deps.raster.load_config()?;
-            migrate_command(&image, &config, deps)
+            migrate_command(&image, &config, deps, options)
         }
-        CommandSpec::Rmi { image } => rmi_command(&image, deps),
+        CommandSpec::Rmi { image } => rmi_command(&image, deps, options),
         CommandSpec::Run {
             filepath,
             container_cmd,
-        } => run_command(&filepath, &container_cmd, deps),
+        } => run_command(&filepath, &container_cmd, deps, options),
     }
 }
 
@@ -526,10 +568,15 @@ fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
     Ok(AppOutput::success(""))
 }
 
-fn pull_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+fn pull_command(
+    image: &str,
+    config: &Config,
+    deps: &AppDeps<'_>,
+    options: ExecOptions,
+) -> Result<AppOutput, AppError> {
     let ctx = build_pull_ctx(config);
     print_progress_message(&format!("Pulling {image} with Podman..."));
-    deps.runtime.pull(image, &ctx)?;
+    deps.runtime.pull(image, &ctx, options.verbose)?;
     if !deps.runtime.image_exists(image, &ctx)? {
         return Err(AppError::Runtime(format!(
             "Image {image} is still missing after pull"
@@ -537,7 +584,7 @@ fn pull_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppO
     }
 
     let mut output = AppOutput::success("");
-    merge_output(&mut output, migrate_command(image, config, deps)?);
+    merge_output(&mut output, migrate_command(image, config, deps, options)?);
     Ok(output)
 }
 
@@ -545,6 +592,7 @@ fn migrate_command(
     image: &str,
     config: &Config,
     deps: &AppDeps<'_>,
+    options: ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let seed_ctx = build_parallax_seed_ctx(config);
 
@@ -558,7 +606,8 @@ fn migrate_command(
     let parallax_path = PathBuf::from(&config.parallax_path);
 
     print_progress_message(&format!("Migrating {image} with Parallax..."));
-    deps.runtime.parallax_migrate(&parallax_path, &ctx, image)?;
+    deps.runtime
+        .parallax_migrate(&parallax_path, &ctx, image, options.verbose)?;
     if !deps.runtime.image_exists(image, &ctx)? {
         return Err(AppError::Runtime(format!(
             "Image {image} is still missing after migration"
@@ -568,7 +617,11 @@ fn migrate_command(
     Ok(AppOutput::success(""))
 }
 
-fn rmi_command(image: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+fn rmi_command(
+    image: &str,
+    deps: &AppDeps<'_>,
+    options: ExecOptions,
+) -> Result<AppOutput, AppError> {
     let config = deps.raster.load_config()?;
     let seed_ctx = build_parallax_seed_ctx(&config);
 
@@ -581,7 +634,8 @@ fn rmi_command(image: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
     };
     let parallax_path = PathBuf::from(&config.parallax_path);
 
-    deps.runtime.parallax_rmi(&parallax_path, &ctx, image)?;
+    deps.runtime
+        .parallax_rmi(&parallax_path, &ctx, image, options.verbose)?;
     Ok(AppOutput::success(""))
 }
 
@@ -589,13 +643,14 @@ fn run_command(
     filepath: &str,
     container_cmd: &[String],
     deps: &AppDeps<'_>,
+    options: ExecOptions,
 ) -> Result<AppOutput, AppError> {
     match deps.raster.render(filepath) {
         Ok(edf) => {
             // Loading config in each branch is a small duplication,
             // but allows to integration test invalid EDF cases without needing a valid config present
             let config = deps.raster.load_config()?;
-            run_edf_command(&edf, container_cmd, &config, deps)
+            run_edf_command(&edf, container_cmd, &config, deps, options)
         }
         Err(_) => {
             let contents = fs::read_to_string(filepath)
@@ -605,7 +660,7 @@ fn run_command(
             })?;
 
             let config = deps.raster.load_config()?;
-            run_yaml_command(filepath, &config, deps)
+            run_yaml_command(filepath, &config, deps, options)
         }
     }
 }
@@ -615,6 +670,7 @@ fn run_edf_command(
     container_cmd: &[String],
     config: &Config,
     deps: &AppDeps<'_>,
+    options: ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
     let ro_ctx = build_readonly_ctx(config);
@@ -622,7 +678,10 @@ fn run_edf_command(
     let mut output = AppOutput::success("");
 
     if !deps.runtime.image_exists(&edf.image, &ro_ctx)? {
-        merge_output(&mut output, pull_command(&edf.image, config, deps)?);
+        merge_output(
+            &mut output,
+            pull_command(&edf.image, config, deps, options)?,
+        );
     }
 
     let container_name = format!("sarusctl-{}", &Uuid::new_v4().simple().to_string()[..8]);
@@ -660,6 +719,7 @@ fn run_yaml_command(
     filepath: &str,
     config: &Config,
     deps: &AppDeps<'_>,
+    options: ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
     let ro_ctx = build_readonly_ctx(config);
@@ -671,7 +731,7 @@ fn run_yaml_command(
 
     for image in images {
         if !deps.runtime.image_exists(&image, &ro_ctx)? {
-            merge_output(&mut output, pull_command(&image, config, deps)?);
+            merge_output(&mut output, pull_command(&image, config, deps, options)?);
         }
     }
 
@@ -808,6 +868,9 @@ mod tests {
 
     struct FakeContainerRuntime {
         calls: RefCell<Vec<String>>,
+        pull_verbose: RefCell<Vec<bool>>,
+        migrate_verbose: RefCell<Vec<bool>>,
+        rmi_verbose: RefCell<Vec<bool>>,
         graphroot: Result<PathBuf, AppError>,
         image_exists: RefCell<HashMap<String, VecDeque<bool>>>,
         pull_results: RefCell<HashMap<String, Result<(), AppError>>>,
@@ -821,6 +884,9 @@ mod tests {
         fn new() -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
+                pull_verbose: RefCell::new(Vec::new()),
+                migrate_verbose: RefCell::new(Vec::new()),
+                rmi_verbose: RefCell::new(Vec::new()),
                 graphroot: Ok(PathBuf::from("/graphroot")),
                 image_exists: RefCell::new(HashMap::new()),
                 pull_results: RefCell::new(HashMap::new()),
@@ -840,6 +906,18 @@ mod tests {
         fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
         }
+
+        fn pull_verbose(&self) -> Vec<bool> {
+            self.pull_verbose.borrow().clone()
+        }
+
+        fn migrate_verbose(&self) -> Vec<bool> {
+            self.migrate_verbose.borrow().clone()
+        }
+
+        fn rmi_verbose(&self) -> Vec<bool> {
+            self.rmi_verbose.borrow().clone()
+        }
     }
 
     impl ContainerRuntime for FakeContainerRuntime {
@@ -855,8 +933,9 @@ mod tests {
             Ok(())
         }
 
-        fn pull(&self, image: &str, _ctx: &PodmanCtx) -> Result<(), AppError> {
+        fn pull(&self, image: &str, _ctx: &PodmanCtx, verbose: bool) -> Result<(), AppError> {
             self.calls.borrow_mut().push(format!("pull:{image}"));
+            self.pull_verbose.borrow_mut().push(verbose);
             self.pull_results
                 .borrow_mut()
                 .remove(image)
@@ -877,8 +956,10 @@ mod tests {
             _parallax_path: &Path,
             _ctx: &PodmanCtx,
             image: &str,
+            verbose: bool,
         ) -> Result<(), AppError> {
             self.calls.borrow_mut().push(format!("migrate:{image}"));
+            self.migrate_verbose.borrow_mut().push(verbose);
             self.migrate_results
                 .borrow_mut()
                 .remove(image)
@@ -890,8 +971,10 @@ mod tests {
             _parallax_path: &Path,
             _ctx: &PodmanCtx,
             image: &str,
+            verbose: bool,
         ) -> Result<(), AppError> {
             self.calls.borrow_mut().push(format!("rmi:{image}"));
+            self.rmi_verbose.borrow_mut().push(verbose);
             self.rmi_results
                 .borrow_mut()
                 .remove(image)
@@ -1192,6 +1275,8 @@ spec:
         .unwrap();
 
         assert_eq!(output, AppOutput::success(""));
+        assert_eq!(runtime.pull_verbose(), vec![false]);
+        assert_eq!(runtime.migrate_verbose(), vec![false]);
         assert_eq!(
             runtime.calls(),
             vec![
@@ -1223,6 +1308,7 @@ spec:
         .unwrap();
 
         assert_eq!(output, AppOutput::success(""));
+        assert_eq!(runtime.migrate_verbose(), vec![false]);
         assert_eq!(
             runtime.calls(),
             vec![
@@ -1275,6 +1361,7 @@ spec:
         .unwrap();
 
         assert_eq!(output, AppOutput::success(""));
+        assert_eq!(runtime.rmi_verbose(), vec![false]);
         assert_eq!(
             runtime.calls(),
             vec![
@@ -1361,6 +1448,8 @@ spec:
         .unwrap();
 
         assert_eq!(output, AppOutput::success(""));
+        assert_eq!(runtime.pull_verbose(), vec![false]);
+        assert_eq!(runtime.migrate_verbose(), vec![false]);
         assert_eq!(
             runtime.calls(),
             vec![
@@ -1484,6 +1573,8 @@ spec:
         .unwrap();
 
         assert_eq!(output.return_code, 0);
+        assert_eq!(runtime.pull_verbose(), vec![false]);
+        assert_eq!(runtime.migrate_verbose(), vec![false]);
         assert_eq!(
             runtime.calls(),
             vec![
@@ -1601,6 +1692,79 @@ spec:
                 roots_base.display()
             );
         }
+    }
+
+    #[test]
+    fn pull_propagates_verbose_option() {
+        let config = sample_config();
+        let raster = FakeRasterOps::new(config);
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_image_exists("alpine:3.22", vec![true, true]);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+
+        let output = execute_command_with_options(
+            CommandSpec::Pull {
+                image: String::from("alpine:3.22"),
+            },
+            &mock_deps(&raster, &runtime, &user),
+            ExecOptions { verbose: true },
+        )
+        .unwrap();
+
+        assert_eq!(output, AppOutput::success(""));
+        assert_eq!(runtime.pull_verbose(), vec![true]);
+        assert_eq!(runtime.migrate_verbose(), vec![true]);
+    }
+
+    #[test]
+    fn rmi_propagates_verbose_option() {
+        let config = sample_config();
+        let raster = FakeRasterOps::new(config);
+        let runtime = FakeContainerRuntime::new();
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+
+        let output = execute_command_with_options(
+            CommandSpec::Rmi {
+                image: String::from("alpine:3.22"),
+            },
+            &mock_deps(&raster, &runtime, &user),
+            ExecOptions { verbose: true },
+        )
+        .unwrap();
+
+        assert_eq!(output, AppOutput::success(""));
+        assert_eq!(runtime.rmi_verbose(), vec![true]);
+    }
+
+    #[test]
+    fn run_propagates_verbose_option_to_internal_pull_and_migrate() {
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster
+            .render_results
+            .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+
+        let output = execute_command_with_options(
+            CommandSpec::Run {
+                filepath: String::from("job.edf"),
+                container_cmd: vec![String::from("sh")],
+            },
+            &mock_deps(&raster, &runtime, &user),
+            ExecOptions { verbose: true },
+        )
+        .unwrap();
+
+        assert_eq!(output, AppOutput::success(""));
+        assert_eq!(runtime.pull_verbose(), vec![true]);
+        assert_eq!(runtime.migrate_verbose(), vec![true]);
     }
 
     #[test]
