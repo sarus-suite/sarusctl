@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str;
 use std::time::{Duration, Instant};
@@ -527,6 +528,7 @@ fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
 
 fn pull_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
     let ctx = build_pull_ctx(config);
+    print_progress_message(&format!("Pulling {image} with Podman..."));
     deps.runtime.pull(image, &ctx)?;
     if !deps.runtime.image_exists(image, &ctx)? {
         return Err(AppError::Runtime(format!(
@@ -534,7 +536,7 @@ fn pull_command(image: &str, config: &Config, deps: &AppDeps<'_>) -> Result<AppO
         )));
     }
 
-    let mut output = AppOutput::success(format!("Pulled {image} with Podman"));
+    let mut output = AppOutput::success("");
     merge_output(&mut output, migrate_command(image, config, deps)?);
     Ok(output)
 }
@@ -555,6 +557,7 @@ fn migrate_command(
     };
     let parallax_path = PathBuf::from(&config.parallax_path);
 
+    print_progress_message(&format!("Migrating {image} with Parallax..."));
     deps.runtime.parallax_migrate(&parallax_path, &ctx, image)?;
     if !deps.runtime.image_exists(image, &ctx)? {
         return Err(AppError::Runtime(format!(
@@ -562,9 +565,7 @@ fn migrate_command(
         )));
     }
 
-    Ok(AppOutput::success(format!(
-        "Migrated {image} with Parallax"
-    )))
+    Ok(AppOutput::success(""))
 }
 
 fn rmi_command(image: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
@@ -711,6 +712,10 @@ fn merge_output(base: &mut AppOutput, extra: AppOutput) {
     if extra.return_code != 0 {
         base.return_code = extra.return_code;
     }
+}
+
+fn print_progress_message(message: &str) {
+    let _ = writeln!(io::stderr(), "{message}");
 }
 
 fn append_warning(output: &mut AppOutput, warning: String) {
@@ -1186,7 +1191,7 @@ spec:
         )
         .unwrap();
 
-        assert_eq!(output.return_code, 0);
+        assert_eq!(output, AppOutput::success(""));
         assert_eq!(
             runtime.calls(),
             vec![
@@ -1217,7 +1222,7 @@ spec:
         )
         .unwrap();
 
-        assert_eq!(output.return_code, 0);
+        assert_eq!(output, AppOutput::success(""));
         assert_eq!(
             runtime.calls(),
             vec![
@@ -1355,9 +1360,7 @@ spec:
         )
         .unwrap();
 
-        assert_eq!(output.return_code, 0);
-        assert!(output.stdout.contains("Pulled alpine:3.22 with Podman"));
-        assert!(output.stdout.contains("Migrated alpine:3.22 with Parallax"));
+        assert_eq!(output, AppOutput::success(""));
         assert_eq!(
             runtime.calls(),
             vec![
