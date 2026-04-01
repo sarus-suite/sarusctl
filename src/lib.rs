@@ -460,8 +460,7 @@ fn describe_dir_entries(path: &Path) -> String {
 }
 
 pub fn extract_images_from_yaml_str(contents: &str) -> Result<Vec<String>, AppError> {
-    let manifest = yaml_serde::from_str::<yaml_serde::Value>(contents)
-        .map_err(|e| AppError::Yaml(e.to_string()))?;
+    let manifest = parse_yaml_value(contents)?;
     let mut images = BTreeSet::new();
     collect_yaml_images(&manifest, &mut images);
     Ok(images.into_iter().collect())
@@ -471,6 +470,70 @@ pub fn extract_images_from_yaml_manifest(filepath: &Path) -> Result<Vec<String>,
     let contents = fs::read_to_string(filepath)
         .map_err(|e| AppError::Io(format!("failed to read {}: {e}", filepath.display())))?;
     extract_images_from_yaml_str(&contents)
+}
+
+pub fn extract_join_container_from_yaml_str(contents: &str) -> Result<String, AppError> {
+    let manifest = parse_yaml_value(contents)?;
+    let containers = yaml_mapping_get(&manifest, "spec")
+        .and_then(|spec| yaml_mapping_get(spec, "containers"))
+        .and_then(yaml_serde::Value::as_sequence)
+        .ok_or_else(|| AppError::Yaml(String::from("YAML manifest must define spec.containers")))?;
+
+    let mut all_names = Vec::new();
+    let mut join_names = Vec::new();
+
+    for container in containers {
+        let name = yaml_mapping_get(container, "name")
+            .and_then(yaml_serde::Value::as_str)
+            .ok_or_else(|| {
+                AppError::Yaml(String::from(
+                    "Each container in spec.containers must define a string name",
+                ))
+            })?
+            .to_string();
+
+        let join_label = yaml_mapping_get(container, "labels")
+            .and_then(|labels| yaml_mapping_get(labels, "run.sarus.join"))
+            .and_then(yaml_serde::Value::as_str);
+
+        if join_label == Some("true") {
+            join_names.push(name.clone());
+        }
+
+        all_names.push(name);
+    }
+
+    match join_names.as_slice() {
+        [name] => Ok(name.clone()),
+        [] => match all_names.as_slice() {
+            [name] => Ok(name.clone()),
+            [] => Err(AppError::Yaml(String::from(
+                "YAML manifest must define at least one container in spec.containers",
+            ))),
+            _ => Err(AppError::Yaml(String::from(
+                "YAML manifest must label exactly one container with run.sarus.join=\"true\" when spec.containers has multiple containers",
+            ))),
+        },
+        _ => Err(AppError::Yaml(String::from(
+            "YAML manifest must not label more than one container with run.sarus.join=\"true\"",
+        ))),
+    }
+}
+
+pub fn extract_join_container_from_yaml_manifest(filepath: &Path) -> Result<String, AppError> {
+    let contents = fs::read_to_string(filepath)
+        .map_err(|e| AppError::Io(format!("failed to read {}: {e}", filepath.display())))?;
+    extract_join_container_from_yaml_str(&contents)
+}
+
+fn parse_yaml_value(contents: &str) -> Result<yaml_serde::Value, AppError> {
+    yaml_serde::from_str::<yaml_serde::Value>(contents).map_err(|e| AppError::Yaml(e.to_string()))
+}
+
+fn yaml_mapping_get<'a>(value: &'a yaml_serde::Value, key: &str) -> Option<&'a yaml_serde::Value> {
+    value
+        .as_mapping()?
+        .get(yaml_serde::Value::String(String::from(key)))
 }
 
 /// Recursively traverse the YAML structure to find all values of "image" keys that are strings, and collect them into the provided set.
@@ -1101,6 +1164,125 @@ spec:
     #[test]
     fn extract_images_from_yaml_str_rejects_invalid_yaml() {
         let err = extract_images_from_yaml_str("apiVersion: [").unwrap_err();
+        assert!(matches!(err, AppError::Yaml(_)));
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_returns_single_unlabeled_container() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+"#;
+
+        let join_container = extract_join_container_from_yaml_str(yaml).unwrap();
+        assert_eq!(join_container, String::from("app"));
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_returns_labeled_container() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+    - name: sidecar
+      image: ubuntu:24.04
+      labels:
+        run.sarus.join: "true"
+"#;
+
+        let join_container = extract_join_container_from_yaml_str(yaml).unwrap();
+        assert_eq!(join_container, String::from("sidecar"));
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_rejects_multiple_labeled_containers() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+      labels:
+        run.sarus.join: "true"
+    - name: sidecar
+      image: ubuntu:24.04
+      labels:
+        run.sarus.join: "true"
+"#;
+
+        let err = extract_join_container_from_yaml_str(yaml).unwrap_err();
+        assert_eq!(
+            err,
+            AppError::Yaml(String::from(
+                "YAML manifest must not label more than one container with run.sarus.join=\"true\"",
+            ))
+        );
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_rejects_unlabeled_multi_container_pod() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+    - name: sidecar
+      image: ubuntu:24.04
+"#;
+
+        let err = extract_join_container_from_yaml_str(yaml).unwrap_err();
+        assert_eq!(
+            err,
+            AppError::Yaml(String::from(
+                "YAML manifest must label exactly one container with run.sarus.join=\"true\" when spec.containers has multiple containers",
+            ))
+        );
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_ignores_init_containers_and_nested_templates() {
+        let yaml = r#"
+apiVersion: v1
+kind: Pod
+spec:
+  initContainers:
+    - name: init
+      image: busybox:1.36
+      labels:
+        run.sarus.join: "true"
+  containers:
+    - name: app
+      image: alpine:3.22
+      labels:
+        run.sarus.join: "true"
+    - name: sidecar
+      image: ubuntu:24.04
+  template:
+    spec:
+      containers:
+        - name: nested
+          image: debian:bookworm
+          labels:
+            run.sarus.join: "true"
+"#;
+
+        let join_container = extract_join_container_from_yaml_str(yaml).unwrap();
+        assert_eq!(join_container, String::from("app"));
+    }
+
+    #[test]
+    fn extract_join_container_from_yaml_str_rejects_invalid_yaml() {
+        let err = extract_join_container_from_yaml_str("apiVersion: [").unwrap_err();
         assert!(matches!(err, AppError::Yaml(_)));
     }
 
