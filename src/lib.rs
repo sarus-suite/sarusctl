@@ -170,6 +170,12 @@ pub trait ContainerRuntime {
         container_ctx: &ContainerCtx,
         container_cmd: &[String],
     ) -> Result<i32, AppError>;
+    fn exec_interactive(
+        &self,
+        container_name: &str,
+        podman_ctx: &PodmanCtx,
+        container_cmd: &[String],
+    ) -> Result<i32, AppError>;
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError>;
 }
@@ -288,6 +294,19 @@ impl ContainerRuntime for RealContainerRuntime {
         container_cmd: &[String],
     ) -> Result<i32, AppError> {
         pmd::run_from_edf(edf, Some(run_ctx), container_ctx, container_cmd)
+            .code()
+            .ok_or_else(|| {
+                AppError::Runtime(String::from("Container process terminated by signal"))
+            })
+    }
+
+    fn exec_interactive(
+        &self,
+        container_name: &str,
+        podman_ctx: &PodmanCtx,
+        container_cmd: &[String],
+    ) -> Result<i32, AppError> {
+        pmd::exec_interactive(container_name, Some(podman_ctx), container_cmd)
             .code()
             .ok_or_else(|| {
                 AppError::Runtime(String::from("Container process terminated by signal"))
@@ -728,7 +747,7 @@ fn run_command(
             })?;
 
             let config = deps.raster.load_config()?;
-            run_yaml_command(filepath, &config, deps, options)
+            run_yaml_command(filepath, container_cmd, &config, deps, options)
         }
     }
 }
@@ -785,6 +804,7 @@ fn run_edf_command(
 
 fn run_yaml_command(
     filepath: &str,
+    container_cmd: &[String],
     config: &Config,
     deps: &AppDeps<'_>,
     options: ExecOptions,
@@ -803,7 +823,12 @@ fn run_yaml_command(
         }
     }
 
+    let join_container = extract_join_container_from_yaml_manifest(Path::new(filepath))?;
+
     let play_result = deps.runtime.kube_play(filepath, &run_ctx);
+    let exec_result = deps
+        .runtime
+        .exec_interactive(&join_container, &run_ctx, container_cmd);
     let down_result = deps.runtime.kube_down(filepath, true, &run_ctx);
     // TODO check if we need to do anything else to report errors from kube_down as well
     let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
@@ -815,6 +840,15 @@ fn run_yaml_command(
             None => err,
         });
     }
+    output.return_code = match exec_result {
+        Ok(return_code) => return_code,
+        Err(err) => {
+            return Err(match cleanup_warning {
+                Some(warning) => combine_error_with_warning(err, warning),
+                None => err,
+            });
+        }
+    };
     if let Err(err) = down_result {
         return Err(match cleanup_warning {
             Some(warning) => combine_error_with_warning(err, warning),
@@ -1062,9 +1096,23 @@ mod tests {
             edf: &EDF,
             _run_ctx: &PodmanCtx,
             _container_ctx: &ContainerCtx,
-            _container_cmd: &[String],
+            container_cmd: &[String],
         ) -> Result<i32, AppError> {
-            self.calls.borrow_mut().push(format!("run:{}", edf.image));
+            self.calls
+                .borrow_mut()
+                .push(format!("run:{}:{container_cmd:?}", edf.image));
+            self.run_result.clone()
+        }
+
+        fn exec_interactive(
+            &self,
+            container_name: &str,
+            _podman_ctx: &PodmanCtx,
+            container_cmd: &[String],
+        ) -> Result<i32, AppError> {
+            self.calls.borrow_mut().push(format!(
+                "exec_interactive:{container_name}:{container_cmd:?}"
+            ));
             self.run_result.clone()
         }
 
@@ -1628,7 +1676,7 @@ spec:
             runtime.calls(),
             vec![
                 String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22")
+                String::from("run:alpine:3.22:[\"sh\"]")
             ]
         );
     }
@@ -1666,7 +1714,7 @@ spec:
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22")
+                String::from("run:alpine:3.22:[\"sh\"]")
             ]
         );
     }
@@ -1752,8 +1800,12 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-    - image: alpine:3.22
-    - image: ubuntu:24.04
+    - name: app
+      image: alpine:3.22
+    - name: sidecar
+      image: ubuntu:24.04
+      labels:
+        run.sarus.join: "true"
 "#,
         )
         .unwrap();
@@ -1793,6 +1845,7 @@ spec:
                 String::from("image_exists:alpine:3.22"),
                 String::from("image_exists:ubuntu:24.04"),
                 format!("kube_play:{}", manifest.to_string_lossy()),
+                String::from("exec_interactive:sidecar:[]"),
                 format!("kube_down:{}?force=true", manifest.to_string_lossy()),
             ]
         );
@@ -1809,7 +1862,8 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-    - image: alpine:3.22
+    - name: app
+      image: alpine:3.22
 "#,
         )
         .unwrap();
@@ -1862,7 +1916,8 @@ apiVersion: v1
 kind: Pod
 spec:
   containers:
-    - image: alpine:3.22
+    - name: app
+      image: alpine:3.22
 "#,
         )
         .unwrap();
@@ -1900,6 +1955,61 @@ spec:
                 roots_base.display()
             );
         }
+    }
+
+    #[test]
+    fn run_yaml_fails_before_kube_play_when_join_container_selection_is_ambiguous() {
+        let temp = tempdir().unwrap();
+        let manifest = temp.path().join("pod.yaml");
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      image: alpine:3.22
+    - name: sidecar
+      image: ubuntu:24.04
+"#,
+        )
+        .unwrap();
+
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster.render_results.insert(
+            manifest.to_string_lossy().into_owned(),
+            Err(String::from("not an edf")),
+        );
+        let runtime = FakeContainerRuntime::new();
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_image_exists("ubuntu:24.04", vec![true]);
+        let user = FakeUserContext {
+            user: CurrentUser { uid: 1, gid: 1 },
+        };
+
+        let err = execute_command(
+            CommandSpec::Run {
+                filepath: manifest.to_string_lossy().into_owned(),
+                container_cmd: vec![],
+            },
+            &mock_deps(&raster, &runtime, &user),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            AppError::Yaml(String::from(
+                "YAML manifest must label exactly one container with run.sarus.join=\"true\" when spec.containers has multiple containers",
+            ))
+        );
+        assert_eq!(
+            runtime.calls(),
+            vec![
+                String::from("image_exists:alpine:3.22"),
+                String::from("image_exists:ubuntu:24.04"),
+            ]
+        );
     }
 
     #[test]
