@@ -1610,7 +1610,7 @@ spec:
                 String::from("migrate:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("image_exists:ubuntu:24.04"),
-                format!("kube_play:{}", manifest.to_string_lossy())
+                format!("kube_play:{}", manifest.to_string_lossy()),
                 format!("kube_down:{}?force=true", manifest.to_string_lossy()),
             ]
         );
