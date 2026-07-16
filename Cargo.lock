@@ -689,6 +689,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "is_executable"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82cb6a9f675da968c63b6208c641b9dca58fc0133ae53375736b1767b0cab8bd"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1047,9 +1056,10 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 [[package]]
 name = "raster"
 version = "0.1.0"
-source = "git+https://github.com/sarus-suite/raster#95b6ee00c33514e53efc111d870d62fd8d5dd8a3"
+source = "git+https://github.com/sarus-suite/raster#20f75bd3a12afe28f33503337a96670faa7550a7"
 dependencies = [
  "derivative",
+ "is_executable",
  "jsonschema",
  "nix",
  "regex",
@@ -1058,6 +1068,7 @@ dependencies = [
  "serial_test",
  "shellexpand",
  "toml",
+ "walkdir",
 ]
 
 [[package]]
@@ -1203,9 +1214,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
+name = "same-file"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+dependencies = [
+ "winapi-util",
+]
+
+[[package]]
 name = "sarus-suite-podman-driver"
-version = "0.4.0"
-source = "git+https://github.com/sarus-suite/podman-driver#b83c0c544bb03fed1deeeed8b4a5d969c882b24d"
+version = "0.5.0"
+source = "git+https://github.com/sarus-suite/podman-driver#37d150f360a68226ffeee79645fa347574b3ea64"
 dependencies = [
  "anyhow",
  "bstr",
@@ -1680,6 +1700,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "walkdir"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
+dependencies = [
+ "same-file",
+ "winapi-util",
+]
+
+[[package]]
 name = "want"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1769,6 +1799,15 @@ checksum = "9b32828d774c412041098d182a8b38b16ea816958e07cf40eec2bc080ae137ac"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "winapi-util"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
