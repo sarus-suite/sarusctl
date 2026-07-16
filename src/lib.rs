@@ -1,5 +1,5 @@
 use clap::ValueEnum;
-use raster::{self, EDF, config::Config, hook_run, ExecutedCommand};
+use raster::{self, EDF, ExecutedCommand, config::Config, hook_run};
 use sarus_suite_podman_driver::{self as pmd, ContainerCtx, PodmanCtx};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -13,9 +13,10 @@ use uuid::Uuid;
 
 // TODO review pub status in this file, restrict pub only to entities needed in main.rs and tests
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExecOptions {
     pub verbose: bool,
+    pub parallax_imagestore: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -142,6 +143,7 @@ pub trait UserContext {
 
 pub trait RasterOps {
     fn load_config(&self) -> Result<Config, AppError>;
+    fn load_config_path(&self, path: &Path) -> Result<Config, AppError>;
     fn validate(&self, path: &str) -> Result<(), String>;
     fn render(&self, path: &str) -> Result<EDF, String>;
 }
@@ -151,6 +153,12 @@ pub trait ContainerRuntime {
     fn images(&self, ctx: &PodmanCtx) -> Result<(), AppError>;
     fn pull(&self, image: &str, ctx: &PodmanCtx, verbose: bool) -> Result<(), AppError>;
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError>;
+    fn parallax_exist(
+        &self,
+        parallax_path: &Path,
+        ctx: &PodmanCtx,
+        image: &str,
+    ) -> Result<bool, AppError>;
     fn parallax_migrate(
         &self,
         parallax_path: &Path,
@@ -180,6 +188,7 @@ pub trait ContainerRuntime {
     ) -> Result<i32, AppError>;
     fn kube_play(&self, filepath: &str, run_ctx: &PodmanCtx) -> Result<(), AppError>;
     fn kube_down(&self, filepath: &str, force: bool, run_ctx: &PodmanCtx) -> Result<(), AppError>;
+    fn cleanup_storage(&self, run_ctx: &PodmanCtx) -> Result<(), AppError>;
 }
 
 pub struct AppDeps<'a> {
@@ -192,7 +201,16 @@ pub struct RealRasterOps;
 
 impl RasterOps for RealRasterOps {
     fn load_config(&self) -> Result<Config, AppError> {
-        raster::load_config().map_err(|e| AppError::ConfigLoad(e.to_string()))
+        load_config_with_fallback(self)
+    }
+
+    fn load_config_path(&self, path: &Path) -> Result<Config, AppError> {
+        raster::load_config_path(
+            Some(path.to_path_buf()),
+            raster::config::VarExpand::Must,
+            &None,
+        )
+        .map_err(|e| AppError::ConfigLoad(e.to_string()))
     }
 
     fn validate(&self, path: &str) -> Result<(), String> {
@@ -206,8 +224,61 @@ impl RasterOps for RealRasterOps {
 
 pub struct RealContainerRuntime;
 
+const SYSTEM_CONFIG_DIR: &str = "/etc/sarus-suite";
+const USER_CONFIG_DIR_NAME: &str = "sarus-suite";
+
+fn load_config_with_fallback(raster: &dyn RasterOps) -> Result<Config, AppError> {
+    let mut candidates = vec![PathBuf::from(SYSTEM_CONFIG_DIR)];
+    if let Some(user_dir) = user_config_dir() {
+        candidates.push(user_dir);
+    }
+
+    load_config_from_candidates(raster, &candidates)
+}
+
+fn load_config_from_candidates(
+    raster: &dyn RasterOps,
+    candidates: &[PathBuf],
+) -> Result<Config, AppError> {
+    let mut searched = Vec::with_capacity(candidates.len());
+
+    for path in candidates {
+        searched.push(path.display().to_string());
+        if config_dir_exists(path)? {
+            return raster.load_config_path(path);
+        }
+    }
+
+    Err(AppError::ConfigLoad(format!(
+        "Cannot find config files in {}",
+        searched.join(" or ")
+    )))
+}
+
+fn config_dir_exists(path: &Path) -> Result<bool, AppError> {
+    match fs::metadata(path).map(|metadata| metadata.is_dir()) {
+        Ok(true) => Ok(true),
+        Ok(false) => Err(AppError::ConfigLoad(format!(
+            "Failed to access configuration directory {}: path exists but is not a directory",
+            path.display()
+        ))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(AppError::ConfigLoad(format!(
+            "Failed to access configuration directory {}: {err}",
+            path.display()
+        ))),
+    }
+}
+
+fn user_config_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join(".config").join(USER_CONFIG_DIR_NAME))
+}
+
 impl ContainerRuntime for RealContainerRuntime {
     fn default_graphroot(&self, ctx: &PodmanCtx) -> Result<PathBuf, AppError> {
+        //TODO Revise with logging: println!("Resolving default Podman graphroot...");
         let output = pmd::info(Some("{{.Store.GraphRoot}}"), Some(ctx));
         if !output.status.success() {
             return Err(AppError::PodmanInfo(
@@ -247,7 +318,18 @@ impl ContainerRuntime for RealContainerRuntime {
     }
 
     fn image_exists(&self, image: &str, ctx: &PodmanCtx) -> Result<bool, AppError> {
-        Ok(pmd::image_exists(image, Some(ctx)))
+        //TODO revise with logging:println!("Checking if image {image} exists in Podman...");
+        pmd::image_exists(image, Some(ctx)).map_err(|e| AppError::Runtime(e.to_string()))
+    }
+
+    fn parallax_exist(
+        &self,
+        parallax_path: &Path,
+        ctx: &PodmanCtx,
+        image: &str,
+    ) -> Result<bool, AppError> {
+        pmd::parallax_exist(&parallax_path.to_path_buf(), ctx, image)
+            .map_err(|e| AppError::Runtime(e.to_string()))
     }
 
     fn parallax_migrate(
@@ -324,6 +406,18 @@ impl ContainerRuntime for RealContainerRuntime {
         pmd::kube_down(filepath, force, Some(run_ctx));
         Ok(())
     }
+
+    fn cleanup_storage(&self, run_ctx: &PodmanCtx) -> Result<(), AppError> {
+        let out = pmd::loggable::system_reset(Some(run_ctx));
+        if out.output.status.success() {
+            Ok(())
+        } else {
+            Err(AppError::Runtime(format!(
+                "Podman storage cleanup failed: {}",
+                String::from_utf8_lossy(&out.output.stderr).trim()
+            )))
+        }
+    }
 }
 
 pub struct RealUserContext;
@@ -398,7 +492,10 @@ pub fn build_run_ctx(config: &Config, user: &CurrentUser) -> PodmanCtx {
     }
     .with_env("PARALLAX_MP_UID", config.parallax_mp_uid.to_string())
     .with_env("PARALLAX_MP_GID", config.parallax_mp_gid.to_string())
-    .with_env("PARALLAX_MP_SQUASHFUSE_CMD", config.parallax_mp_squashfuse_path.clone())
+    .with_env(
+        "PARALLAX_MP_SQUASHFUSE_CMD",
+        config.parallax_mp_squashfuse_path.clone(),
+    )
     .with_env("PARALLAX_MP_LOGFILE", config.parallax_mp_logfile.clone())
 }
 
@@ -606,25 +703,41 @@ pub fn execute_command_with_options(
     match command {
         CommandSpec::Validate { filepath, .. } => validate_command(&filepath, deps),
         CommandSpec::Render { filepath, .. } => render_command(&filepath, deps),
-        CommandSpec::Images => images_command(deps),
+        CommandSpec::Images => {
+            let config = load_config_with_options(deps.raster, &options)?;
+            images_command(&config, deps)
+        }
         CommandSpec::Pull { image } => {
-            // pull_command() and migrate_command() are also called internally by other functions,
-            // so they receive the config from the outside to avoid loading it multiple times.
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_options(deps.raster, &options)?;
             setup_imagestore(&config)?;
-            pull_command(&image, &config, deps, options)
+            pull_command(&image, &config, deps, &options)
         }
         CommandSpec::Migrate { image } => {
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_options(deps.raster, &options)?;
             setup_imagestore(&config)?;
-            migrate_command(&image, &config, deps, options)
+            migrate_command(&image, &config, deps, &options)
         }
-        CommandSpec::Rmi { image } => rmi_command(&image, deps, options),
+        CommandSpec::Rmi { image } => {
+            let config = load_config_with_options(deps.raster, &options)?;
+            rmi_command(&image, &config, deps, &options)
+        }
         CommandSpec::Run {
+            // Run is the only command that loads the config on its own to facilitate testing of invalid EDF files without needing a valid config present
             filepath,
             container_cmd,
-        } => run_command(&filepath, &container_cmd, deps, options),
+        } => run_command(&filepath, &container_cmd, deps, &options),
     }
+}
+
+fn load_config_with_options(
+    raster: &dyn RasterOps,
+    options: &ExecOptions,
+) -> Result<Config, AppError> {
+    let mut config = raster.load_config()?;
+    if let Some(parallax_imagestore) = &options.parallax_imagestore {
+        config.parallax_imagestore = parallax_imagestore.clone();
+    }
+    Ok(config)
 }
 
 fn validate_command(filepath: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
@@ -643,19 +756,18 @@ fn render_command(filepath: &str, deps: &AppDeps<'_>) -> Result<AppOutput, AppEr
     })
 }
 
-fn images_command(deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
-    let config = deps.raster.load_config()?;
-    let seed_ctx = build_parallax_seed_ctx(&config);
+fn images_command(config: &Config, deps: &AppDeps<'_>) -> Result<AppOutput, AppError> {
+    let seed_ctx = build_parallax_seed_ctx(config);
 
-    // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
-    // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
+    // Use the Parallax seed context to pre-populate the struct with Podman path and additionalimagestore,
+    // then add the default graphroot
     let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
     let ctx = PodmanCtx {
         graphroot: Some(graphroot),
         ..seed_ctx
     };
 
-    setup_imagestore(&config)?;
+    setup_imagestore(config)?;
 
     deps.runtime.images(&ctx)?;
     Ok(AppOutput::success(""))
@@ -665,7 +777,7 @@ fn pull_command(
     image: &str,
     config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let ctx = build_pull_ctx(config);
     print_progress_message(&format!("Pulling {image} with Podman..."));
@@ -685,12 +797,12 @@ fn migrate_command(
     image: &str,
     config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let seed_ctx = build_parallax_seed_ctx(config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
-    // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
+    // Not necessary on Podman commands, because Podman resolves the graphroot location on its own.
     let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
     let ctx = PodmanCtx {
         graphroot: Some(graphroot),
@@ -701,7 +813,7 @@ fn migrate_command(
     print_progress_message(&format!("Migrating {image} with Parallax..."));
     deps.runtime
         .parallax_migrate(&parallax_path, &ctx, image, options.verbose)?;
-    if !deps.runtime.image_exists(image, &ctx)? {
+    if !deps.runtime.parallax_exist(&parallax_path, &ctx, image)? {
         return Err(AppError::Runtime(format!(
             "Image {image} is still missing after migration"
         )));
@@ -712,21 +824,21 @@ fn migrate_command(
 
 fn rmi_command(
     image: &str,
+    config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
-    let config = deps.raster.load_config()?;
-    let seed_ctx = build_parallax_seed_ctx(&config);
+    let seed_ctx = build_parallax_seed_ctx(config);
 
     // We need to find and explicitly state the graphroot because it needs to be passed to Parallax under the hood.
-    // Not necessary on pull context because that's a plain Podman invocation, and Podman resolves the graphroot location on its own.
+    // Not necessary on Podman commands, because Podman resolves the graphroot location on its own.
     let graphroot = deps.runtime.default_graphroot(&seed_ctx)?;
     let ctx = PodmanCtx {
         graphroot: Some(graphroot),
         ..seed_ctx
     };
     let parallax_path = PathBuf::from(&config.parallax_path);
-    setup_imagestore(&config)?;
+    setup_imagestore(config)?;
 
     deps.runtime
         .parallax_rmi(&parallax_path, &ctx, image, options.verbose)?;
@@ -737,13 +849,13 @@ fn run_command(
     filepath: &str,
     container_cmd: &[String],
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     match deps.raster.render(filepath) {
         Ok(edf) => {
             // Loading config in each branch is a small duplication,
             // but allows to integration test invalid EDF cases without needing a valid config present
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_options(deps.raster, options)?;
             setup_imagestore(&config)?;
             run_edf_command(&edf, container_cmd, &config, deps, options)
         }
@@ -754,7 +866,7 @@ fn run_command(
                 AppError::UnsupportedInput(format!("{filepath} is not valid EDF nor YAML"))
             })?;
 
-            let config = deps.raster.load_config()?;
+            let config = load_config_with_options(deps.raster, options)?;
             setup_imagestore(&config)?;
             run_yaml_command(filepath, container_cmd, &config, deps, options)
         }
@@ -766,14 +878,19 @@ fn run_edf_command(
     container_cmd: &[String],
     config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
-    let ro_ctx = build_readonly_ctx(config);
+    let plx_ctx = build_parallax_seed_ctx(config);
     let run_ctx = build_run_ctx(config, &user);
     let mut output = AppOutput::success("");
 
-    if !deps.runtime.image_exists(&edf.image, &ro_ctx)? {
+    let parallax_path = PathBuf::from(&config.parallax_path);
+
+    if !deps
+        .runtime
+        .parallax_exist(&parallax_path, &plx_ctx, &edf.image)?
+    {
         merge_output(
             &mut output,
             pull_command(&edf.image, config, deps, options)?,
@@ -787,12 +904,15 @@ fn run_edf_command(
         detach: false,
         set_env: true,
         pidfile: None,
+        user: Some(user.uid.to_string()),
     };
 
     let run_result = deps
         .runtime
         .run_from_edf(edf, &run_ctx, &c_ctx, container_cmd);
+    let storage_cleanup_error = deps.runtime.cleanup_storage(&run_ctx).err();
     let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
+    let cleanup_warning = merge_cleanup_warning(storage_cleanup_error, cleanup_warning);
 
     // Append warning to error in case of run failure
     output.return_code = match run_result {
@@ -816,10 +936,10 @@ fn run_yaml_command(
     container_cmd: &[String],
     config: &Config,
     deps: &AppDeps<'_>,
-    options: ExecOptions,
+    options: &ExecOptions,
 ) -> Result<AppOutput, AppError> {
     let user = deps.user.current_user()?;
-    let ro_ctx = build_readonly_ctx(config);
+    let plx_ctx = build_parallax_seed_ctx(config);
     let mut run_ctx = build_run_ctx(config, &user);
     // Podman kube play doesn't seem to honor all settings from a module
     // so to avoid confusion we disable the module for the time being.
@@ -831,8 +951,13 @@ fn run_yaml_command(
     let images = extract_images_from_yaml_value(&manifest)?;
     let mut output = AppOutput::success("");
 
+    let parallax_path = PathBuf::from(&config.parallax_path);
+
     for image in images {
-        if !deps.runtime.image_exists(&image, &ro_ctx)? {
+        if !deps
+            .runtime
+            .parallax_exist(&parallax_path, &plx_ctx, &image)?
+        {
             merge_output(&mut output, pull_command(&image, config, deps, options)?);
         }
     }
@@ -845,7 +970,9 @@ fn run_yaml_command(
         .exec_interactive(&join_container, &run_ctx, container_cmd);
     let down_result = deps.runtime.kube_down(filepath, true, &run_ctx);
     // TODO check if we need to do anything else to report errors from kube_down as well
+    let storage_cleanup_error = deps.runtime.cleanup_storage(&run_ctx).err();
     let cleanup_warning = cleanup_podman_rootdirs(&run_ctx);
+    let cleanup_warning = merge_cleanup_warning(storage_cleanup_error, cleanup_warning);
 
     // Append warning to error in case of run failure
     if let Err(err) = play_result {
@@ -911,27 +1038,38 @@ fn combine_error_with_warning(err: AppError, warning: String) -> AppError {
     AppError::Runtime(format!("{err}\n{warning}"))
 }
 
+fn merge_cleanup_warning(
+    storage_cleanup_error: Option<AppError>,
+    rootdir_cleanup_warning: Option<String>,
+) -> Option<String> {
+    match (storage_cleanup_error, rootdir_cleanup_warning) {
+        (Some(err), Some(warning)) => Some(format!("{err}\n{warning}")),
+        (None, warning) => warning,
+        (Some(_), None) => None,
+    }
+}
+
 fn setup_imagestore(config: &Config) -> Result<(), AppError> {
     let imagestore = &config.parallax_imagestore;
     let imagestore_pb = PathBuf::from(&imagestore);
 
-    let opt_ec = hook_run(config, "parallax_imagestore_create", vec![&imagestore]).map_err(|e| {
-        AppError::Io(format!(
-            "Failed to run parallax_imagestore_create hook: {e}"
-        ))
-    })?;
+    let opt_ec =
+        hook_run(config, "parallax_imagestore_create", vec![&imagestore]).map_err(|e| {
+            AppError::Io(format!(
+                "Failed to run parallax_imagestore_create hook: {e}"
+            ))
+        })?;
 
     match opt_ec {
         Some(ec) => log_hook_ec(ec, "parallax_imagestore_create hook")?,
-        None => {},
+        None => {}
     }
 
     if !fs::exists(&imagestore_pb).map_err(|e| {
-            AppError::Io(format!(
-                "Failed to check for existence of Parallax imagestore directory: {e}"
-            ))
-        })?
-    {
+        AppError::Io(format!(
+            "Failed to check for existence of Parallax imagestore directory: {e}"
+        ))
+    })? {
         fs::create_dir_all(&imagestore_pb).map_err(|e| {
             AppError::Io(format!(
                 "Failed to create Parallax imagestore directory: {e}"
@@ -942,12 +1080,9 @@ fn setup_imagestore(config: &Config) -> Result<(), AppError> {
 }
 
 fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
-
     let rc = match ec.output.status.code() {
         Some(ok) => format!("{ok}"),
-        None => {
-            String::from("UNKNOWN")
-        }
+        None => String::from("UNKNOWN"),
     };
 
     let mut stdout = match String::from_utf8(ec.output.stdout) {
@@ -972,7 +1107,7 @@ fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
             eprintln!("{}", line);
         }
     }
-    
+
     if stdout != "" {
         let lines = stdout.split("\n");
         for line in lines {
@@ -982,13 +1117,9 @@ fn log_hook_ec(ec: ExecutedCommand, prefix: &str) -> Result<(), AppError> {
 
     if rc != "0" {
         if rc == "UNKNOWN" {
-            return Err(AppError::Io(format!(
-                "{prefix} exited by signal"
-            )));
+            return Err(AppError::Io(format!("{prefix} exited by signal")));
         } else {
-            return Err(AppError::Io(format!(
-                "{prefix} exit code: {rc}"
-            )));
+            return Err(AppError::Io(format!("{prefix} exit code: {rc}")));
         }
     }
     Ok(())
@@ -1006,8 +1137,14 @@ mod tests {
 
     fn sample_config() -> Config {
         Config {
-            parallax_imagestore: String::from("/scratch/user/parallax/store"),
+            parallax_imagestore: std::env::temp_dir()
+                .join("sarusctl-test-parallax-store")
+                .to_string_lossy()
+                .into_owned(),
             parallax_mount_program: String::from("/usr/local/bin/parallax_mount_program"),
+            parallax_mp_uid: 1234,
+            parallax_mp_gid: 4321,
+            parallax_mp_logfile: String::from("/tmp/parallax-1234/mount_program.log"),
             parallax_path: String::from("/usr/local/bin/parallax"),
             podman_module: String::from("hpc"),
             podman_path: String::from("/usr/bin/podman"),
@@ -1030,6 +1167,7 @@ mod tests {
 
     struct FakeRasterOps {
         config: Result<Config, AppError>,
+        config_paths: RefCell<Vec<PathBuf>>,
         validate_results: HashMap<String, Result<(), String>>,
         render_results: HashMap<String, Result<EDF, String>>,
     }
@@ -1038,14 +1176,24 @@ mod tests {
         fn new(config: Config) -> Self {
             Self {
                 config: Ok(config),
+                config_paths: RefCell::new(Vec::new()),
                 validate_results: HashMap::new(),
                 render_results: HashMap::new(),
             }
+        }
+
+        fn config_paths(&self) -> Vec<PathBuf> {
+            self.config_paths.borrow().clone()
         }
     }
 
     impl RasterOps for FakeRasterOps {
         fn load_config(&self) -> Result<Config, AppError> {
+            self.config.clone()
+        }
+
+        fn load_config_path(&self, path: &Path) -> Result<Config, AppError> {
+            self.config_paths.borrow_mut().push(path.to_path_buf());
             self.config.clone()
         }
 
@@ -1078,12 +1226,14 @@ mod tests {
         rmi_verbose: RefCell<Vec<bool>>,
         graphroot: Result<PathBuf, AppError>,
         image_exists: RefCell<HashMap<String, VecDeque<bool>>>,
+        parallax_exist: RefCell<HashMap<String, VecDeque<bool>>>,
         pull_results: RefCell<HashMap<String, Result<(), AppError>>>,
         migrate_results: RefCell<HashMap<String, Result<(), AppError>>>,
         rmi_results: RefCell<HashMap<String, Result<(), AppError>>>,
         run_result: Result<i32, AppError>,
         kube_play_result: Result<(), AppError>,
         kube_down_result: Result<(), AppError>,
+        cleanup_storage_result: Result<(), AppError>,
     }
 
     impl FakeContainerRuntime {
@@ -1098,14 +1248,22 @@ mod tests {
                 pull_results: RefCell::new(HashMap::new()),
                 migrate_results: RefCell::new(HashMap::new()),
                 rmi_results: RefCell::new(HashMap::new()),
+                parallax_exist: RefCell::new(HashMap::new()),
                 run_result: Ok(0),
                 kube_play_result: Ok(()),
                 kube_down_result: Ok(()),
+                cleanup_storage_result: Ok(()),
             }
         }
 
         fn push_image_exists(&self, image: &str, values: Vec<bool>) {
             self.image_exists
+                .borrow_mut()
+                .insert(image.to_string(), VecDeque::from(values));
+        }
+
+        fn push_parallax_exist(&self, image: &str, values: Vec<bool>) {
+            self.parallax_exist
                 .borrow_mut()
                 .insert(image.to_string(), VecDeque::from(values));
         }
@@ -1154,6 +1312,20 @@ mod tests {
                 .borrow_mut()
                 .push(format!("image_exists:{image}"));
             let mut states = self.image_exists.borrow_mut();
+            let queue = states.entry(image.to_string()).or_default();
+            Ok(queue.pop_front().unwrap_or(false))
+        }
+
+        fn parallax_exist(
+            &self,
+            _parallax_path: &Path,
+            _ctx: &PodmanCtx,
+            image: &str,
+        ) -> Result<bool, AppError> {
+            self.calls
+                .borrow_mut()
+                .push(format!("parallax_exist:{image}"));
+            let mut states = self.parallax_exist.borrow_mut();
             let queue = states.entry(image.to_string()).or_default();
             Ok(queue.pop_front().unwrap_or(false))
         }
@@ -1231,6 +1403,13 @@ mod tests {
                 .push(format!("kube_down:{filepath}?force={force}"));
             self.kube_down_result.clone()
         }
+
+        fn cleanup_storage(&self, _run_ctx: &PodmanCtx) -> Result<(), AppError> {
+            self.calls
+                .borrow_mut()
+                .push(String::from("cleanup_storage"));
+            self.cleanup_storage_result.clone()
+        }
     }
 
     fn mock_deps<'a>(
@@ -1245,23 +1424,91 @@ mod tests {
         }
     }
 
-    fn unique_test_user() -> CurrentUser {
-        CurrentUser {
-            uid: Uuid::new_v4().as_u128() as u32,
-            gid: 1,
-        }
+    #[test]
+    fn load_config_from_candidates_uses_first_existing_directory() {
+        let temp = tempdir().unwrap();
+        let system_dir = temp.path().join("system");
+        let user_dir = temp.path().join("user");
+        fs::create_dir_all(&system_dir).unwrap();
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let raster = FakeRasterOps::new(sample_config());
+        let config = load_config_from_candidates(&raster, &[system_dir.clone(), user_dir]).unwrap();
+
+        assert_eq!(config.parallax_path, sample_config().parallax_path);
+        assert_eq!(raster.config_paths(), vec![system_dir]);
     }
 
-    fn ensure_clean_rootdirs(user: &CurrentUser) {
-        let roots_base = PathBuf::from("/dev/shm").join(format!("sarusctl-{}", user.uid));
-        if let Err(err) = fs::remove_dir_all(&roots_base) {
-            assert_eq!(
-                err.kind(),
-                ErrorKind::NotFound,
-                "failed to remove stale test rootdirs {}: {err}",
-                roots_base.display()
-            );
-        }
+    #[test]
+    fn load_config_from_candidates_falls_back_when_system_directory_is_missing() {
+        let temp = tempdir().unwrap();
+        let system_dir = temp.path().join("system");
+        let user_dir = temp.path().join("user");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let raster = FakeRasterOps::new(sample_config());
+        let config = load_config_from_candidates(&raster, &[system_dir, user_dir.clone()]).unwrap();
+
+        assert_eq!(config.parallax_path, sample_config().parallax_path);
+        assert_eq!(raster.config_paths(), vec![user_dir]);
+    }
+
+    #[test]
+    fn load_config_from_candidates_does_not_fallback_after_existing_directory_errors() {
+        let temp = tempdir().unwrap();
+        let system_dir = temp.path().join("system");
+        let user_dir = temp.path().join("user");
+        fs::create_dir_all(&system_dir).unwrap();
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let mut raster = FakeRasterOps::new(sample_config());
+        raster.config = Err(AppError::ConfigLoad(String::from("invalid config")));
+
+        let err = match load_config_from_candidates(&raster, &[system_dir.clone(), user_dir]) {
+            Ok(_) => panic!("expected config load to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err, AppError::ConfigLoad(String::from("invalid config")));
+        assert_eq!(raster.config_paths(), vec![system_dir]);
+    }
+
+    #[test]
+    fn load_config_from_candidates_reports_both_missing_locations() {
+        let temp = tempdir().unwrap();
+        let system_dir = temp.path().join("system");
+        let user_dir = temp.path().join("user");
+        let raster = FakeRasterOps::new(sample_config());
+
+        let err =
+            match load_config_from_candidates(&raster, &[system_dir.clone(), user_dir.clone()]) {
+                Ok(_) => panic!("expected config load to fail"),
+                Err(err) => err,
+            };
+
+        assert_eq!(
+            err,
+            AppError::ConfigLoad(format!(
+                "Cannot find config files in {} or {}",
+                system_dir.display(),
+                user_dir.display()
+            ))
+        );
+        assert!(raster.config_paths().is_empty());
+    }
+
+    #[test]
+    fn load_config_with_options_overrides_parallax_imagestore() {
+        let raster = FakeRasterOps::new(sample_config());
+        let override_path = String::from("/overridden/parallax/imagestore");
+        let options = ExecOptions {
+            parallax_imagestore: Some(override_path.clone()),
+            ..ExecOptions::default()
+        };
+
+        let config = load_config_with_options(&raster, &options).unwrap();
+
+        assert_eq!(config.parallax_imagestore, override_path);
     }
 
     #[test]
@@ -1517,23 +1764,18 @@ spec:
             uid: 1234,
             gid: 4321,
         };
+        let parallax_imagestore = std::env::temp_dir().join("sarusctl-test-parallax-store");
 
         let pull = build_pull_ctx(&config);
         assert_eq!(pull.podman_path, PathBuf::from("/usr/bin/podman"));
 
         let seed = build_parallax_seed_ctx(&config);
         assert_eq!(seed.podman_path, PathBuf::from("/usr/bin/podman"));
-        assert_eq!(
-            seed.ro_store,
-            Some(PathBuf::from("/scratch/user/parallax/store"))
-        );
+        assert_eq!(seed.ro_store, Some(parallax_imagestore.clone()));
 
         let ro = build_readonly_ctx(&config);
         assert_eq!(ro.podman_path, PathBuf::from("/usr/bin/podman"));
-        assert_eq!(
-            ro.graphroot,
-            Some(PathBuf::from("/scratch/user/parallax/store"))
-        );
+        assert_eq!(ro.graphroot, Some(parallax_imagestore.clone()));
 
         let run = build_run_ctx(&config, &user);
         assert_eq!(run.podman_path, PathBuf::from("/usr/bin/podman"));
@@ -1546,10 +1788,7 @@ spec:
             run.runroot,
             Some(PathBuf::from("/dev/shm/sarusctl-1234/runroot"))
         );
-        assert_eq!(
-            seed.ro_store,
-            Some(PathBuf::from("/scratch/user/parallax/store"))
-        );
+        assert_eq!(seed.ro_store, Some(parallax_imagestore));
         let env = run.podman_env.expect("missing env");
         assert_eq!(env.get(OsStr::new("PARALLAX_MP_UID")).unwrap(), "1234");
         assert_eq!(env.get(OsStr::new("PARALLAX_MP_GID")).unwrap(), "4321");
@@ -1659,7 +1898,8 @@ spec:
         let config = sample_config();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -1682,7 +1922,7 @@ spec:
                 String::from("image_exists:alpine:3.22"),
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
-                String::from("image_exists:alpine:3.22")
+                String::from("parallax_exist:alpine:3.22")
             ]
         );
     }
@@ -1692,7 +1932,7 @@ spec:
         let config = sample_config();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -1712,7 +1952,7 @@ spec:
             vec![
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
-                String::from("image_exists:alpine:3.22")
+                String::from("parallax_exist:alpine:3.22")
             ]
         );
     }
@@ -1800,7 +2040,7 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -1818,8 +2058,9 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]")
+                String::from("parallax_exist:alpine:3.22"),
+                String::from("run:alpine:3.22:[\"sh\"]"),
+                String::from("cleanup_storage")
             ]
         );
     }
@@ -1831,7 +2072,8 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -1851,15 +2093,35 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
+                String::from("parallax_exist:alpine:3.22"),
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
-                String::from("image_exists:alpine:3.22"),
-                String::from("run:alpine:3.22:[\"sh\"]")
+                String::from("parallax_exist:alpine:3.22"),
+                String::from("run:alpine:3.22:[\"sh\"]"),
+                String::from("cleanup_storage")
             ]
         );
+    }
+
+    fn unique_test_user() -> CurrentUser {
+        CurrentUser {
+            uid: Uuid::new_v4().as_u128() as u32,
+            gid: 1,
+        }
+    }
+
+    fn ensure_clean_rootdirs(user: &CurrentUser) {
+        let roots_base = PathBuf::from("/dev/shm").join(format!("sarusctl-{}", user.uid));
+        if let Err(err) = fs::remove_dir_all(&roots_base) {
+            assert_eq!(
+                err.kind(),
+                ErrorKind::NotFound,
+                "failed to remove stale test rootdirs {}: {err}",
+                roots_base.display()
+            );
+        }
     }
 
     #[test]
@@ -1869,7 +2131,7 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = unique_test_user();
         ensure_clean_rootdirs(&user);
         let run_ctx = build_run_ctx(&sample_config(), &user);
@@ -1904,7 +2166,7 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false]);
         runtime.pull_results.borrow_mut().insert(
             String::from("alpine:3.22"),
             Err(AppError::Runtime(String::from("registry offline"))),
@@ -1926,7 +2188,7 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
+                String::from("parallax_exist:alpine:3.22"),
                 String::from("pull:alpine:3.22")
             ]
         );
@@ -1961,8 +2223,9 @@ spec:
             Err(String::from("not an edf")),
         );
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
-        runtime.push_image_exists("ubuntu:24.04", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("ubuntu:24.04", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -1982,16 +2245,17 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
+                String::from("parallax_exist:alpine:3.22"),
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("default_graphroot"),
                 String::from("migrate:alpine:3.22"),
-                String::from("image_exists:alpine:3.22"),
-                String::from("image_exists:ubuntu:24.04"),
+                String::from("parallax_exist:alpine:3.22"),
+                String::from("parallax_exist:ubuntu:24.04"),
                 format!("kube_play:{}", manifest.to_string_lossy()),
                 String::from("exec_interactive:training-pod-sidecar:[]"),
                 format!("kube_down:{}?force=true", manifest.to_string_lossy()),
+                String::from("cleanup_storage"),
             ]
         );
     }
@@ -2021,7 +2285,8 @@ spec:
             Err(String::from("not an edf")),
         );
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false, true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
         runtime.migrate_results.borrow_mut().insert(
             String::from("alpine:3.22"),
             Err(AppError::Runtime(String::from("parallax broke"))),
@@ -2043,7 +2308,7 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
+                String::from("parallax_exist:alpine:3.22"),
                 String::from("pull:alpine:3.22"),
                 String::from("image_exists:alpine:3.22"),
                 String::from("default_graphroot"),
@@ -2077,7 +2342,7 @@ spec:
             Err(String::from("not an edf")),
         );
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = unique_test_user();
         ensure_clean_rootdirs(&user);
         let mut run_ctx = build_run_ctx(&sample_config(), &user);
@@ -2133,8 +2398,8 @@ spec:
             Err(String::from("not an edf")),
         );
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true]);
-        runtime.push_image_exists("ubuntu:24.04", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("ubuntu:24.04", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -2157,8 +2422,8 @@ spec:
         assert_eq!(
             runtime.calls(),
             vec![
-                String::from("image_exists:alpine:3.22"),
-                String::from("image_exists:ubuntu:24.04"),
+                String::from("parallax_exist:alpine:3.22"),
+                String::from("parallax_exist:ubuntu:24.04"),
             ]
         );
     }
@@ -2168,7 +2433,8 @@ spec:
         let config = sample_config();
         let raster = FakeRasterOps::new(config);
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![true, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -2178,7 +2444,10 @@ spec:
                 image: String::from("alpine:3.22"),
             },
             &mock_deps(&raster, &runtime, &user),
-            ExecOptions { verbose: true },
+            ExecOptions {
+                verbose: true,
+                ..ExecOptions::default()
+            },
         )
         .unwrap();
 
@@ -2201,7 +2470,10 @@ spec:
                 image: String::from("alpine:3.22"),
             },
             &mock_deps(&raster, &runtime, &user),
-            ExecOptions { verbose: true },
+            ExecOptions {
+                verbose: true,
+                ..ExecOptions::default()
+            },
         )
         .unwrap();
 
@@ -2216,7 +2488,8 @@ spec:
             .render_results
             .insert(String::from("job.edf"), Ok(sample_edf("alpine:3.22")));
         let runtime = FakeContainerRuntime::new();
-        runtime.push_image_exists("alpine:3.22", vec![false, true, true]);
+        runtime.push_parallax_exist("alpine:3.22", vec![false, true]);
+        runtime.push_image_exists("alpine:3.22", vec![true]);
         let user = FakeUserContext {
             user: CurrentUser { uid: 1, gid: 1 },
         };
@@ -2227,7 +2500,10 @@ spec:
                 container_cmd: vec![String::from("sh")],
             },
             &mock_deps(&raster, &runtime, &user),
-            ExecOptions { verbose: true },
+            ExecOptions {
+                verbose: true,
+                ..ExecOptions::default()
+            },
         )
         .unwrap();
 
