@@ -1058,8 +1058,8 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "raster"
-version = "0.2.0"
-source = "git+https://github.com/sarus-suite/raster#0ec2c1fc773a85d3eab2fd50d55d1b052a945f3a"
+version = "0.3.1"
+source = "git+https://github.com/sarus-suite/raster#a52c893b28fbd2602258a4ab13f791805af88be1"
 dependencies = [
  "derivative",
  "is_executable",
@@ -1228,8 +1228,8 @@ dependencies = [
 
 [[package]]
 name = "sarus-suite-podman-driver"
-version = "0.8.1"
-source = "git+https://github.com/sarus-suite/podman-driver#71f50450927dd0d49ac5b2864fb09e48e5fed544"
+version = "0.8.2"
+source = "git+https://github.com/sarus-suite/podman-driver#e0fbb9bd646ed6fda3fc74eb8975d8ac99837577"
 dependencies = [
  "bstr",
  "raster",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "sarusctl"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "assert_cmd",
  "clap",
