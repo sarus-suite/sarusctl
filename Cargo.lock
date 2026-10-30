@@ -1059,7 +1059,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 [[package]]
 name = "raster"
 version = "0.3.1"
-source = "git+https://github.com/sarus-suite/raster#a52c893b28fbd2602258a4ab13f791805af88be1"
+source = "git+https://github.com/sarus-suite/raster#a6950562ef393314063e9e16c41480b95cab1c87"
 dependencies = [
  "derivative",
  "is_executable",
